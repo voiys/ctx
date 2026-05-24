@@ -65,7 +65,7 @@ pub(crate) fn write_snapshot_pages(
     let root = match kind {
         ResourceKind::Docs => home.join("docs"),
         ResourceKind::Notes => home.join("notes"),
-        ResourceKind::Arxiv => home.join("arxiv"),
+        ResourceKind::ResearchPaper => home.join("research_papers"),
         ResourceKind::Source => bail!("source snapshots are not supported"),
     };
     let path = root.join(resource_id).join(&snapshot_id);

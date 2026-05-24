@@ -7,7 +7,7 @@
 It combines three ideas:
 
 - pinned source repositories that agents can inspect on disk
-- snapshotted docs, arXiv papers, and notes that can be retrieved as cited context
+- snapshotted docs, research papers, and notes that can be retrieved as cited context
 - an optional project manifest that says which global resources matter here and why
 
 The CLI is agent-first. It does not have a separate human table output mode. Commands should emit structured, compact stdout and keep progress or diagnostics on stderr.
@@ -44,9 +44,9 @@ Any non-GitHub, non-arXiv `http` or `https` URL is a docs resource.
 
 Docs are crawled, normalized, snapshotted, indexed, and queried. A docs snapshot is immutable and identified by timestamp plus content fingerprint.
 
-### arXiv
+### Research Papers
 
-arXiv abstract, PDF, and HTML URLs are arXiv resources:
+Research papers are queryable resources. V1 supports arXiv as the first paper registry:
 
 ```text
 https://arxiv.org/abs/1706.03762
@@ -54,7 +54,7 @@ https://arxiv.org/pdf/1706.03762.pdf
 https://arxiv.org/html/1706.03762
 ```
 
-V1 normalizes them to the canonical abstract URL, snapshots citation metadata and abstract text, and indexes the arXiv HTML full text when arXiv provides it.
+V1 normalizes arXiv paper URLs to the canonical abstract URL, snapshots citation metadata and abstract text, and indexes the arXiv HTML full text when arXiv provides it. Future registries should plug into the same `research_paper` resource kind.
 
 ### Notes
 
@@ -76,7 +76,7 @@ Manifest entries should include:
 
 - `id`
 - `label`
-- `kind`: `source`, `docs`, `arxiv`, or `notes`
+- `kind`: `source`, `docs`, `research_paper`, or `notes`
 - `url`
 - `reason`
 - `current`: source ref or queryable snapshot id
@@ -92,11 +92,11 @@ Suggested layout:
   ctx.db
   sources/github.com/<owner>/<repo>/<ref>/
   docs/<resource-id>/<snapshot-id>/
-  arxiv/<resource-id>/<snapshot-id>/
+  research_papers/<resource-id>/<snapshot-id>/
   notes/<resource-id>/<snapshot-id>/
 ```
 
-Docs, arXiv, and notes snapshots should store enough metadata to make citations stable:
+Docs, research papers, and notes snapshots should store enough metadata to make citations stable:
 
 - `snapshot_id`
 - `fetched_at`
@@ -125,7 +125,7 @@ Behavior:
 - GitHub repo URL: resolve, pin, clone/cache globally
 - Docs URL: crawl, snapshot, index globally
 - Docs URL: include nearby `llms.txt` when present, then ordinary link crawling
-- arXiv URL: normalize to canonical abstract URL, snapshot paper metadata and available HTML full text, index globally
+- research paper URL: resolve through the matching registry, snapshot paper metadata and available full text, index globally
 - Notes file URL: snapshot, index globally
 Flags:
 
@@ -147,7 +147,7 @@ Flags:
 
 ### `ctx update <label-or-url>`
 
-Refresh a docs, arXiv, or notes resource from the project manifest when present, otherwise from global resources. Create a new immutable snapshot if content changed.
+Refresh a docs, research paper, or notes resource from the project manifest when present, otherwise from global resources. Create a new immutable snapshot if content changed.
 
 For source resources, report the current pin. Changing source refs should be explicit.
 
@@ -164,12 +164,12 @@ Ensure every resource in `.ctx/ctx.json` exists locally and queryable resources 
 
 Flags:
 
-- `--reindex`: rebuild docs/arXiv/notes indexes
+- `--reindex`: rebuild docs/research-paper/notes indexes
 - `--cwd <path>`: project root override
 
 ### `ctx query "<question>"`
 
-Search docs, arXiv papers, and notes. If a project manifest exists, search that project's linked queryable resources. Otherwise, search global queryable resources. Return several cited context blocks.
+Search docs, research papers, and notes. If a project manifest exists, search that project's linked queryable resources. Otherwise, search global queryable resources. Return several cited context blocks.
 
 Flags:
 
@@ -177,7 +177,7 @@ Flags:
 - `--budget <tokens>`: context budget, default `20000`
 - `--debug`: include ranking details
 - `--label <name>`: restrict to one resource
-- `--kind docs|arxiv|notes`: restrict by kind
+- `--kind docs|research-paper|notes`: restrict by kind
 - `--cwd <path>`: project root override
 
 Retrieval uses code-aware lexical search plus semantic search, fused with reciprocal rank fusion. Chunks sourced from `llms.txt` get a small transparent retrieval prior after fusion so curated LLM context can break close ties without overriding stronger matches. Set `CTX_EMBEDDINGS=off` only for tests or constrained environments.
@@ -188,7 +188,7 @@ Show current project state or global state. If a project manifest exists, no-tar
 
 Flags:
 
-- `--snapshots`: include docs/arXiv/notes snapshot history
+- `--snapshots`: include docs/research-paper/notes snapshot history
 - `--cwd <path>`: project root override
 
 ### `ctx list`
@@ -198,7 +198,7 @@ Show all globally cached resources with useful metadata.
 Flags:
 
 - `--project`: only resources linked by the current project
-- `--kind source|docs|arxiv|notes`: filter by kind
+- `--kind source|docs|research-paper|notes`: filter by kind
 - `--cwd <path>`: project root override for project-link annotations
 
 ### `ctx path <label-or-github-url>`
@@ -216,7 +216,7 @@ Move the project manifest pointer for a resource.
 Use cases:
 
 - docs: set current snapshot
-- arXiv: set current snapshot
+- research paper: set current snapshot
 - notes: set current snapshot
 - source: switch pinned ref only when already cached/resolved
 
@@ -276,7 +276,7 @@ Each result should include:
 - content
 - citation
 - url or file path
-- snapshot id for docs/arXiv/notes
+- snapshot id for docs/research-paper/notes
 - source ref for source references when relevant
 - score
 
@@ -314,7 +314,7 @@ resolver   URL classification and resource resolution
 cache      global cache writes and reads
 github     GitHub source clone/pin behavior
 docs       docs crawl and snapshot behavior
-arxiv      arXiv paper metadata and full-text snapshot behavior
+arxiv      arXiv research paper registry behavior
 notes      file URL snapshot behavior
 index      SQLite schema and indexing
 query      retrieval, fusion, packing
@@ -322,4 +322,4 @@ agent      AGENTS.md block upsert
 doctor     health checks
 ```
 
-Keep source/docs/arXiv/notes as distinct resource kinds even if they share storage helpers.
+Keep source/docs/research-paper/notes as distinct resource kinds even if they share storage helpers.

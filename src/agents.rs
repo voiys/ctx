@@ -15,13 +15,13 @@ pub(crate) fn upsert_agents_block(project_root: &Path) -> Result<()> {
 
 Use `ctx` for this project's local context.
 
-- `ctx query "<question>"` searches project docs, arXiv papers, and notes.
+- `ctx query "<question>"` searches project docs, research papers, and notes.
 - `ctx query "<question>" --debug` includes ranking details.
 - `ctx path <label>` prints the local path for pinned source repos.
 - `ctx show` inspects the project manifest.
 - `ctx list --project` shows linked resources.
 
-Source repos are explored on disk. Docs, arXiv papers, and notes are returned as cited context blocks.
+Source repos are explored on disk. Docs, research papers, and notes are returned as cited context blocks.
 {AGENTS_BLOCK_END}"#
     );
     let updated = if let Some(start) = existing.find(AGENTS_BLOCK_START) {

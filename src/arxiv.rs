@@ -36,7 +36,13 @@ pub(crate) fn snapshot_arxiv(
         });
     }
 
-    write_snapshot_pages(home, ResourceKind::Arxiv, resource_id, abs_url, pages)
+    write_snapshot_pages(
+        home,
+        ResourceKind::ResearchPaper,
+        resource_id,
+        abs_url,
+        pages,
+    )
 }
 
 fn fetch_required(client: &reqwest::blocking::Client, url: &str) -> Result<String> {
@@ -53,7 +59,7 @@ fn fetch_optional(client: &reqwest::blocking::Client, url: &str) -> Result<Strin
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct ArxivPaper {
+struct ResearchPaper {
     id: String,
     title: String,
     authors: Vec<String>,
@@ -62,10 +68,10 @@ struct ArxivPaper {
     abstract_text: String,
 }
 
-impl ArxivPaper {
+impl ResearchPaper {
     fn to_context_text(&self) -> String {
         let mut text = String::new();
-        text.push_str("arXiv paper\n\n");
+        text.push_str("Research paper\n\nRegistry: arXiv\n");
         text.push_str("ID: ");
         text.push_str(&self.id);
         text.push_str("\nTitle: ");
@@ -88,7 +94,7 @@ impl ArxivPaper {
     }
 }
 
-fn parse_abs_page(arxiv_id: &str, abs_url: &str, html: &str) -> Result<ArxivPaper> {
+fn parse_abs_page(arxiv_id: &str, abs_url: &str, html: &str) -> Result<ResearchPaper> {
     let document = Html::parse_document(html);
     let title = meta_content(&document, "citation_title")
         .or_else(|| meta_property(&document, "og:title"))
@@ -99,7 +105,7 @@ fn parse_abs_page(arxiv_id: &str, abs_url: &str, html: &str) -> Result<ArxivPape
     let authors = meta_contents(&document, "citation_author");
     let date = meta_content(&document, "citation_date");
     let pdf_url = meta_content(&document, "citation_pdf_url");
-    Ok(ArxivPaper {
+    Ok(ResearchPaper {
         id: arxiv_id.to_string(),
         title,
         authors,
@@ -191,7 +197,7 @@ mod tests {
 
         assert_eq!(
             paper,
-            ArxivPaper {
+            ResearchPaper {
                 id: "1706.03762".to_string(),
                 title: "Attention Is All You Need".to_string(),
                 authors: vec!["Vaswani, Ashish".to_string(), "Shazeer, Noam".to_string()],

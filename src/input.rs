@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow, bail};
 use url::Url;
 
-use crate::models::ResolvedInput;
+use crate::models::{ResearchPaperRegistry, ResolvedInput};
 
 pub(crate) fn resolve_input(input: &str) -> Result<ResolvedInput> {
     let url = Url::parse(input).map_err(|_| anyhow!("ctx add requires an absolute URL"))?;
@@ -30,8 +30,9 @@ pub(crate) fn resolve_input(input: &str) -> Result<ResolvedInput> {
                 })
             } else if matches!(url.host_str(), Some("arxiv.org" | "www.arxiv.org")) {
                 let id = arxiv_id_from_url(&url)?;
-                Ok(ResolvedInput::ArxivPaper {
-                    abs_url: format!("https://arxiv.org/abs/{id}"),
+                Ok(ResolvedInput::ResearchPaper {
+                    registry: ResearchPaperRegistry::Arxiv,
+                    url: format!("https://arxiv.org/abs/{id}"),
                     id,
                 })
             } else {
@@ -125,9 +126,10 @@ mod tests {
         ] {
             let resolved = resolve_input(input).unwrap();
             match resolved {
-                ResolvedInput::ArxivPaper { id, abs_url } => {
+                ResolvedInput::ResearchPaper { registry, id, url } => {
+                    assert_eq!(registry, ResearchPaperRegistry::Arxiv);
                     assert_eq!(id, expected_id);
-                    assert_eq!(abs_url, format!("https://arxiv.org/abs/{expected_id}"));
+                    assert_eq!(url, format!("https://arxiv.org/abs/{expected_id}"));
                 }
                 _ => panic!("expected arxiv paper"),
             }

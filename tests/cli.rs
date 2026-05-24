@@ -776,7 +776,7 @@ fn live_arxiv_paper_can_be_added_and_queried() {
 
     let list = project
         .ctx()
-        .args(["list", "--kind", "arxiv", "--cwd"])
+        .args(["list", "--kind", "research-paper", "--cwd"])
         .arg(project.root.path())
         .assert()
         .success()
@@ -785,7 +785,7 @@ fn live_arxiv_paper_can_be_added_and_queried() {
         .clone();
     let list = String::from_utf8(list).unwrap();
     assert!(list.contains("attention-paper"));
-    assert!(list.contains(",arxiv,"));
+    assert!(list.contains(",research_paper,"));
 
     let output = project
         .ctx()
@@ -795,7 +795,7 @@ fn live_arxiv_paper_can_be_added_and_queried() {
             "--label",
             "attention-paper",
             "--kind",
-            "arxiv",
+            "research-paper",
             "--cwd",
         ])
         .arg(project.root.path())

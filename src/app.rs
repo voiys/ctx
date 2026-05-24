@@ -20,8 +20,8 @@ use crate::manifest::{
     upsert_manifest_resource, write_manifest,
 };
 use crate::models::{
-    CommandStatus, Defaults, Manifest, QueryKind, ResolvedInput, Resource, ResourceKind,
-    SnapshotMetadata,
+    CommandStatus, Defaults, Manifest, QueryKind, ResearchPaperRegistry, ResolvedInput, Resource,
+    ResourceKind, SnapshotMetadata,
 };
 use crate::output::print_toon;
 use crate::retrieve::query_index;
@@ -87,7 +87,7 @@ enum Commands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
-    /// Query project docs, arXiv papers, and notes.
+    /// Query project docs, research papers, and notes.
     Query {
         question: String,
         #[arg(long, default_value_t = DEFAULT_TOP_K)]
@@ -350,18 +350,25 @@ fn add(
             }
             (resource, json!({"snapshot": snapshot}))
         }
-        ResolvedInput::ArxivPaper {
+        ResolvedInput::ResearchPaper {
+            registry,
             id: arxiv_id,
-            abs_url,
+            url,
         } => {
-            let label = label.unwrap_or_else(|| format!("arxiv-{arxiv_id}").replace('/', "-"));
-            let id = stable_id(&format!("arxiv:{abs_url}:{label}"));
-            let snapshot = snapshot_arxiv(&paths.home, &id, &arxiv_id, &abs_url)?;
+            let label = label
+                .unwrap_or_else(|| research_paper_label(registry, &arxiv_id).replace('/', "-"));
+            let id = stable_id(&format!(
+                "research-paper:{}:{url}:{label}",
+                research_paper_registry_name(registry)
+            ));
+            let snapshot = match registry {
+                ResearchPaperRegistry::Arxiv => snapshot_arxiv(&paths.home, &id, &arxiv_id, &url)?,
+            };
             let resource = Resource {
                 id,
                 label,
-                kind: ResourceKind::Arxiv,
-                url: abs_url,
+                kind: ResourceKind::ResearchPaper,
+                url,
                 reason,
                 current: snapshot.snapshot_id.clone(),
                 local_path: Some(snapshot.path.clone()),
@@ -481,7 +488,7 @@ fn update(
                 }),
             })?;
         }
-        ResourceKind::Arxiv => {
+        ResourceKind::ResearchPaper => {
             let arxiv_id = resource
                 .url
                 .trim_start_matches("https://arxiv.org/abs/")
@@ -531,7 +538,7 @@ fn sync(cwd: Option<PathBuf>, reindex: bool) -> Result<()> {
                 .as_deref()
                 .map(Path::new)
                 .is_some_and(Path::exists),
-            ResourceKind::Docs | ResourceKind::Notes | ResourceKind::Arxiv => {
+            ResourceKind::Docs | ResourceKind::Notes | ResourceKind::ResearchPaper => {
                 let path_ready = resource
                     .local_path
                     .as_deref()
@@ -777,7 +784,7 @@ fn use_pointer(cwd: Option<PathBuf>, label: &str, pointer: &str) -> Result<()> {
     let index = find_manifest_resource_index(&manifest, label)?;
     match manifest.resources[index].kind {
         ResourceKind::Source => validate_source_pointer(&manifest.resources[index], pointer)?,
-        ResourceKind::Docs | ResourceKind::Notes | ResourceKind::Arxiv => {
+        ResourceKind::Docs | ResourceKind::Notes | ResourceKind::ResearchPaper => {
             let snapshot_path =
                 snapshot_path_for_pointer(&paths.db_path, &manifest.resources[index].id, pointer)?
                     .ok_or_else(|| anyhow!("snapshot not found for {}: {pointer}", label))?;
@@ -844,5 +851,17 @@ fn read_optional_manifest(paths: &crate::models::RuntimePaths) -> Result<Option<
         Ok(Some(read_manifest(&paths.manifest_path)?))
     } else {
         Ok(None)
+    }
+}
+
+fn research_paper_label(registry: ResearchPaperRegistry, id: &str) -> String {
+    match registry {
+        ResearchPaperRegistry::Arxiv => format!("arxiv-{id}"),
+    }
+}
+
+fn research_paper_registry_name(registry: ResearchPaperRegistry) -> &'static str {
+    match registry {
+        ResearchPaperRegistry::Arxiv => "arxiv",
     }
 }

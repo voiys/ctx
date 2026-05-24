@@ -103,14 +103,22 @@ mod tests {
                 test_resource("source-id", "source", ResourceKind::Source),
                 test_resource("docs-id", "docs", ResourceKind::Docs),
                 test_resource("notes-id", "notes", ResourceKind::Notes),
-                test_resource("arxiv-id", "arxiv", ResourceKind::Arxiv),
+                test_resource(
+                    "research-paper-id",
+                    "research-paper",
+                    ResourceKind::ResearchPaper,
+                ),
             ],
         };
 
         let all = allowed_resource_ids(&manifest, None, None).unwrap();
         assert_eq!(
             all,
-            BTreeSet::from(["arxiv-id".into(), "docs-id".into(), "notes-id".into()])
+            BTreeSet::from([
+                "research-paper-id".into(),
+                "docs-id".into(),
+                "notes-id".into()
+            ])
         );
 
         let source_label = allowed_resource_ids(&manifest, Some("source"), None);
@@ -119,8 +127,9 @@ mod tests {
         let docs = allowed_resource_ids(&manifest, None, Some(ResourceKind::Docs)).unwrap();
         assert_eq!(docs, BTreeSet::from(["docs-id".into()]));
 
-        let arxiv = allowed_resource_ids(&manifest, None, Some(ResourceKind::Arxiv)).unwrap();
-        assert_eq!(arxiv, BTreeSet::from(["arxiv-id".into()]));
+        let papers =
+            allowed_resource_ids(&manifest, None, Some(ResourceKind::ResearchPaper)).unwrap();
+        assert_eq!(papers, BTreeSet::from(["research-paper-id".into()]));
     }
 
     fn test_resource(id: &str, label: &str, kind: ResourceKind) -> Resource {

@@ -297,7 +297,10 @@ pub(crate) fn list_global_resources(
     for row in rows {
         let row = row?;
         if let Some(kind) = kind
-            && row["kind"].as_str() != Some(kind_str(kind))
+            && row["kind"]
+                .as_str()
+                .and_then(parse_kind)
+                .is_none_or(|parsed_kind| parsed_kind != kind)
         {
             continue;
         }
@@ -466,7 +469,7 @@ fn parse_kind(value: &str) -> Option<ResourceKind> {
         "source" => Some(ResourceKind::Source),
         "docs" => Some(ResourceKind::Docs),
         "notes" => Some(ResourceKind::Notes),
-        "arxiv" => Some(ResourceKind::Arxiv),
+        "research_paper" | "arxiv" => Some(ResourceKind::ResearchPaper),
         _ => None,
     }
 }

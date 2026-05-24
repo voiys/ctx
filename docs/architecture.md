@@ -23,8 +23,8 @@ manifest.rs   .ctx/ctx.json reads, writes, selection helpers
 input.rs      absolute URL classification
 source.rs     GitHub source clone/pin/path behavior
 crawl.rs      recursive bounded docs crawl
-arxiv.rs      arXiv paper metadata and optional HTML full-text capture
-snapshot.rs   immutable docs/arXiv/notes snapshot writing
+arxiv.rs      arXiv research paper registry behavior
+snapshot.rs   immutable docs/research-paper/notes snapshot writing
 storage.rs    SQLite schema, global resources, indexing, cache metadata
 retrieve.rs   lexical/vector retrieval, RRF, context packing
 embeddings.rs swappable embedding backend boundary
@@ -53,13 +53,13 @@ ctx path <label>
 rg "symbol" "$(ctx path <label>)"
 ```
 
-Docs, arXiv papers, and notes are the searchable retrieval corpus.
+Docs, research papers, and notes are the searchable retrieval corpus.
 
 This keeps code exploration structural and lets `ctx query` focus on high-recall prose/context retrieval.
 
 ## Retrieval Snapshots
 
-Docs and arXiv pages are mutable on the internet, so `ctx` treats each crawl or paper capture as an immutable local snapshot. Notes are snapshotted the same way for consistent citations and rollbacks.
+Docs and research paper registry pages are mutable on the internet, so `ctx` treats each crawl or paper capture as an immutable local snapshot. Notes are snapshotted the same way for consistent citations and rollbacks.
 
 ```text
 snapshot id = fetched timestamp + content fingerprint
@@ -74,7 +74,7 @@ Queries should never silently update a retrieval snapshot.
 Target retrieval flow:
 
 1. Load `.ctx/ctx.json` when present
-2. Select project docs/arXiv/notes resources, or global docs/arXiv/notes resources when no project exists
+2. Select project docs/research-paper/notes resources, or global docs/research-paper/notes resources when no project exists
 3. Generate lexical candidates using code-aware tokens
 4. Generate vector candidates when embeddings exist
 5. Fuse candidates with reciprocal rank fusion
