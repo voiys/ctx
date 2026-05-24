@@ -7,7 +7,6 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use directories::UserDirs;
-use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use rayon::prelude::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
@@ -16,9 +15,12 @@ use uuid::Uuid;
 
 use crate::constants::{
     AGENTS_BLOCK_END, AGENTS_BLOCK_START, DEFAULT_BUDGET_TOKENS, DEFAULT_CRAWL_CONCURRENCY,
-    DEFAULT_MAX_PAGES, DEFAULT_TOP_K, EMBEDDING_BATCH_SIZE, RRF_K,
+    DEFAULT_MAX_PAGES, DEFAULT_TOP_K, RRF_K,
 };
 use crate::crawl::crawl_docs;
+use crate::embeddings::{
+    EmbeddingBackend, EmbeddingService, bytes_to_embedding, cosine_similarity,
+};
 use crate::input::resolve_input;
 use crate::manifest::{
     allowed_resource_ids, find_manifest_resource, find_manifest_resource_index, read_manifest,
@@ -965,11 +967,8 @@ fn index_pages(
         .iter()
         .map(|(_, _, _, content)| content.clone())
         .collect::<Vec<_>>();
-    let embeddings = if embeddings_enabled() {
-        embed_passages(db_path, &contents)?
-    } else {
-        vec![None; contents.len()]
-    };
+    let mut embedding_backend = EmbeddingService::from_env(db_path)?;
+    let embeddings = embedding_backend.embed_passages(&contents)?;
 
     for (global_index, ((_, _, source_url, content), embedding)) in
         chunks.iter().zip(embeddings.iter()).enumerate()
@@ -997,86 +996,6 @@ fn index_pages(
     }
     tx.commit()?;
     Ok(())
-}
-
-fn embeddings_enabled() -> bool {
-    std::env::var("CTX_EMBEDDINGS")
-        .map(|value| !matches!(value.as_str(), "0" | "false" | "off" | "no"))
-        .unwrap_or(true)
-}
-
-fn embed_passages(db_path: &Path, contents: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
-    if contents.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut model = embedding_model(db_path)?;
-    let mut out = Vec::with_capacity(contents.len());
-    for batch in contents.chunks(EMBEDDING_BATCH_SIZE) {
-        let inputs = batch
-            .iter()
-            .map(|content| format!("passage: {content}"))
-            .collect::<Vec<_>>();
-        let embeddings = model.embed(inputs, None)?;
-        out.extend(
-            embeddings
-                .into_iter()
-                .map(|embedding| Some(embedding_to_bytes(&embedding))),
-        );
-    }
-    Ok(out)
-}
-
-fn embed_query(db_path: &Path, question: &str) -> Result<Vec<f32>> {
-    let mut model = embedding_model(db_path)?;
-    let embeddings = model.embed(vec![format!("query: {question}")], None)?;
-    embeddings
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("embedding model returned no query embedding"))
-}
-
-fn embedding_model(db_path: &Path) -> Result<TextEmbedding> {
-    let models_dir = db_path
-        .parent()
-        .ok_or_else(|| anyhow!("database path has no parent"))?
-        .join("models");
-    fs::create_dir_all(&models_dir)?;
-    let options = TextInitOptions::new(EmbeddingModel::AllMiniLML6V2Q)
-        .with_cache_dir(models_dir)
-        .with_show_download_progress(false);
-    TextEmbedding::try_new(options)
-}
-
-fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
-    embedding
-        .iter()
-        .flat_map(|value| value.to_le_bytes())
-        .collect()
-}
-
-fn bytes_to_embedding(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect()
-}
-
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
-    let mut dot = 0.0f64;
-    let mut a_norm = 0.0f64;
-    let mut b_norm = 0.0f64;
-    for (x, y) in a.iter().zip(b.iter()) {
-        let x = *x as f64;
-        let y = *y as f64;
-        dot += x * y;
-        a_norm += x * x;
-        b_norm += y * y;
-    }
-    if a_norm == 0.0 || b_norm == 0.0 {
-        0.0
-    } else {
-        dot / (a_norm.sqrt() * b_norm.sqrt())
-    }
 }
 
 fn ensure_db(path: &Path) -> Result<()> {
@@ -1200,11 +1119,7 @@ fn query_index(
         return Ok(Vec::new());
     }
     let lexical = lexical_candidates(db_path, question, allowed_resource_ids, top_k.max(50) * 10)?;
-    let vector = if embeddings_enabled() {
-        vector_candidates(db_path, question, allowed_resource_ids, top_k.max(50) * 10)?
-    } else {
-        Vec::new()
-    };
+    let vector = vector_candidates(db_path, question, allowed_resource_ids, top_k.max(50) * 10)?;
     let fused = fuse_candidates(lexical, vector);
     let matched_tokens = tokenize(question);
     let mut out = Vec::new();
@@ -1334,7 +1249,10 @@ fn vector_candidates(
     if chunks.is_empty() {
         return Ok(Vec::new());
     }
-    let query_embedding = embed_query(db_path, question)?;
+    let mut embedding_backend = EmbeddingService::from_env(db_path)?;
+    let Some(query_embedding) = embedding_backend.embed_query(question)? else {
+        return Ok(Vec::new());
+    };
     let mut scored = chunks
         .into_par_iter()
         .map(|(base, bytes)| {

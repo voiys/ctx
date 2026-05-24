@@ -5,6 +5,7 @@ mod util;
 mod manifest;
 mod input;
 mod crawl;
+mod embeddings;
 mod app;
 
 fn main() {
