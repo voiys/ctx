@@ -1,26 +1,26 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use directories::UserDirs;
 use serde_json::json;
 use url::Url;
 
 use crate::constants::{
-    AGENTS_BLOCK_END, AGENTS_BLOCK_START, DEFAULT_BUDGET_TOKENS, DEFAULT_CRAWL_CONCURRENCY,
-    DEFAULT_MAX_PAGES, DEFAULT_TOP_K,
+    DEFAULT_BUDGET_TOKENS, DEFAULT_CRAWL_CONCURRENCY, DEFAULT_MAX_PAGES, DEFAULT_TOP_K,
 };
+use crate::agents::upsert_agents_block;
+use crate::context::AppContext;
 use crate::input::resolve_input;
+use crate::install::install;
 use crate::manifest::{
     allowed_resource_ids, find_manifest_resource, find_manifest_resource_index, read_manifest,
     upsert_manifest_resource, write_manifest,
 };
 use crate::models::{
     CommandStatus, Defaults, Manifest, QueryKind, ResolvedInput, Resource, ResourceKind,
-    RuntimePaths, SnapshotMetadata,
+    SnapshotMetadata,
 };
 use crate::output::print_toon;
 use crate::retrieve::query_index;
@@ -31,7 +31,7 @@ use crate::storage::{
     snapshot_path_for_pointer, snapshots_for_resources, upsert_global_resource,
 };
 use crate::util::{
-    default_label_for_url, make_executable, stable_id, timestamp,
+    default_label_for_url, stable_id, timestamp,
 };
 
 #[derive(Parser)]
@@ -208,10 +208,9 @@ pub fn run() -> Result<()> {
 }
 
 fn init(cwd: Option<PathBuf>, write_agents: bool) -> Result<()> {
-    let paths = runtime_paths(cwd)?;
-    fs::create_dir_all(&paths.ctx_dir)?;
-    fs::create_dir_all(&paths.home)?;
-    ensure_db(&paths.db_path)?;
+    let app = AppContext::load(cwd)?;
+    let paths = &app.paths;
+    app.init_storage()?;
 
     if !paths.manifest_path.exists() {
         write_manifest(
@@ -248,8 +247,9 @@ fn add(
     max_pages: usize,
     concurrency: usize,
 ) -> Result<()> {
-    let paths = runtime_paths(cwd)?;
-    ensure_project(&paths)?;
+    let app = AppContext::load(cwd)?;
+    let paths = &app.paths;
+    app.ensure_project()?;
     let mut manifest = read_manifest(&paths.manifest_path)?;
     let resolved = resolve_input(input_url)?;
     let now = timestamp();
@@ -353,8 +353,9 @@ fn update(
     max_pages: usize,
     concurrency: usize,
 ) -> Result<()> {
-    let paths = runtime_paths(cwd)?;
-    ensure_project(&paths)?;
+    let app = AppContext::load(cwd)?;
+    let paths = &app.paths;
+    app.ensure_project()?;
     let mut manifest = read_manifest(&paths.manifest_path)?;
     let index = find_manifest_resource_index(&manifest, target)?;
     let mut resource = manifest.resources[index].clone();
@@ -435,8 +436,9 @@ fn update(
 }
 
 fn sync(cwd: Option<PathBuf>, reindex: bool) -> Result<()> {
-    let paths = runtime_paths(cwd)?;
-    ensure_project(&paths)?;
+    let app = AppContext::load(cwd)?;
+    let paths = &app.paths;
+    app.ensure_project()?;
     ensure_db(&paths.db_path)?;
     let manifest = read_manifest(&paths.manifest_path)?;
     let mut checked = Vec::new();
@@ -503,8 +505,9 @@ fn query(
     label: Option<String>,
     kind: Option<QueryKind>,
 ) -> Result<()> {
-    let paths = runtime_paths(cwd)?;
-    ensure_project(&paths)?;
+    let app = AppContext::load(cwd)?;
+    let paths = &app.paths;
+    app.ensure_project()?;
     ensure_db(&paths.db_path)?;
     let manifest = read_manifest(&paths.manifest_path)?;
     let allowed = allowed_resource_ids(&manifest, label.as_deref(), kind.map(Into::into))?;
@@ -531,8 +534,9 @@ fn query(
 }
 
 fn show(cwd: Option<PathBuf>, target: Option<String>, snapshots: bool) -> Result<()> {
-    let paths = runtime_paths(cwd)?;
-    ensure_project(&paths)?;
+    let app = AppContext::load(cwd)?;
+    let paths = &app.paths;
+    app.ensure_project()?;
     let manifest = read_manifest(&paths.manifest_path)?;
     let resources = if let Some(target) = target {
         vec![find_manifest_resource(&manifest, &target)?.clone()]
@@ -557,7 +561,8 @@ fn show(cwd: Option<PathBuf>, target: Option<String>, snapshots: bool) -> Result
 }
 
 fn list(cwd: Option<PathBuf>, project_only: bool, kind: Option<ResourceKind>) -> Result<()> {
-    let paths = runtime_paths(cwd)?;
+    let app = AppContext::load(cwd)?;
+    let paths = &app.paths;
     ensure_db(&paths.db_path)?;
     let project_resources = if project_only || paths.manifest_path.exists() {
         read_manifest(&paths.manifest_path)
@@ -596,8 +601,9 @@ fn list(cwd: Option<PathBuf>, project_only: bool, kind: Option<ResourceKind>) ->
 }
 
 fn print_source_path(cwd: Option<PathBuf>, target: &str) -> Result<()> {
-    let paths = runtime_paths(cwd)?;
-    ensure_project(&paths)?;
+    let app = AppContext::load(cwd)?;
+    let paths = &app.paths;
+    app.ensure_project()?;
     let manifest = read_manifest(&paths.manifest_path)?;
     let resource = find_manifest_resource(&manifest, target)?;
     if resource.kind != ResourceKind::Source {
@@ -611,8 +617,9 @@ fn print_source_path(cwd: Option<PathBuf>, target: &str) -> Result<()> {
 }
 
 fn use_pointer(cwd: Option<PathBuf>, label: &str, pointer: &str) -> Result<()> {
-    let paths = runtime_paths(cwd)?;
-    ensure_project(&paths)?;
+    let app = AppContext::load(cwd)?;
+    let paths = &app.paths;
+    app.ensure_project()?;
     let mut manifest = read_manifest(&paths.manifest_path)?;
     let index = find_manifest_resource_index(&manifest, label)?;
     match manifest.resources[index].kind {
@@ -637,8 +644,9 @@ fn use_pointer(cwd: Option<PathBuf>, label: &str, pointer: &str) -> Result<()> {
 }
 
 fn remove(cwd: Option<PathBuf>, target: &str, prune_cache: bool) -> Result<()> {
-    let paths = runtime_paths(cwd)?;
-    ensure_project(&paths)?;
+    let app = AppContext::load(cwd)?;
+    let paths = &app.paths;
+    app.ensure_project()?;
     let mut manifest = read_manifest(&paths.manifest_path)?;
     let removed = find_manifest_resource(&manifest, target)?.clone();
     let before = manifest.resources.len();
@@ -666,7 +674,8 @@ fn remove(cwd: Option<PathBuf>, target: &str, prune_cache: bool) -> Result<()> {
 }
 
 fn doctor(cwd: Option<PathBuf>) -> Result<()> {
-    let paths = runtime_paths(cwd)?;
+    let app = AppContext::load(cwd)?;
+    let paths = &app.paths;
     let manifest_exists = paths.manifest_path.exists();
     let db_ok = ensure_db(&paths.db_path).is_ok();
     let resource_count = if manifest_exists {
@@ -688,116 +697,4 @@ fn doctor(cwd: Option<PathBuf>) -> Result<()> {
             "project_resource_count": resource_count,
         }),
     })
-}
-
-fn install(bin_dir: Option<PathBuf>, force: bool) -> Result<()> {
-    let target_dir = match bin_dir {
-        Some(path) => path,
-        None => UserDirs::new()
-            .ok_or_else(|| anyhow!("could not determine home directory"))?
-            .home_dir()
-            .join(".local")
-            .join("bin"),
-    };
-    fs::create_dir_all(&target_dir)?;
-    let target = target_dir.join("ctx");
-    if target.exists() && !force {
-        bail!(
-            "{} already exists; pass --force to replace it",
-            target.display()
-        );
-    }
-    let current = std::env::current_exe()?;
-    fs::copy(&current, &target)?;
-    make_executable(&target)?;
-    print_toon(CommandStatus {
-        command: "install",
-        status: "ok",
-        result: json!({
-            "source": current,
-            "target": target,
-        }),
-    })
-}
-
-fn runtime_paths(cwd: Option<PathBuf>) -> Result<RuntimePaths> {
-    let project_root = cwd.unwrap_or(std::env::current_dir()?).canonicalize()?;
-    let ctx_dir = project_root.join(".ctx");
-    let manifest_path = ctx_dir.join("ctx.json");
-    let home = if let Ok(value) = std::env::var("CTX_HOME") {
-        PathBuf::from(value)
-    } else {
-        UserDirs::new()
-            .ok_or_else(|| anyhow!("could not determine home directory"))?
-            .home_dir()
-            .join(".ctx")
-    };
-    let db_path = home.join("ctx.db");
-    Ok(RuntimePaths {
-        project_root,
-        manifest_path,
-        ctx_dir,
-        home,
-        db_path,
-    })
-}
-
-fn ensure_project(paths: &RuntimePaths) -> Result<()> {
-    if !paths.manifest_path.exists() {
-        bail!(
-            "no ctx project found at {}; run `ctx init` first",
-            paths.manifest_path.display()
-        );
-    }
-    fs::create_dir_all(&paths.home)?;
-    ensure_db(&paths.db_path)?;
-    Ok(())
-}
-
-fn upsert_agents_block(project_root: &Path) -> Result<()> {
-    let path = project_root.join("AGENTS.md");
-    let existing = fs::read_to_string(&path).unwrap_or_default();
-    let block = format!(
-        r#"{AGENTS_BLOCK_START}
-## ctx
-
-Use `ctx` for this project's local context.
-
-- `ctx query "<question>"` searches project docs and notes.
-- `ctx query "<question>" --debug` includes ranking details.
-- `ctx path <label>` prints the local path for pinned source repos.
-- `ctx show` inspects the project manifest.
-- `ctx list --project` shows linked resources.
-
-Source repos are explored on disk. Docs and notes are returned as cited context blocks.
-{AGENTS_BLOCK_END}"#
-    );
-    let updated = if let Some(start) = existing.find(AGENTS_BLOCK_START) {
-        if let Some(end_rel) = existing[start..].find(AGENTS_BLOCK_END) {
-            let end = start + end_rel + AGENTS_BLOCK_END.len();
-            format!(
-                "{}{}{}",
-                existing[..start].trim_end(),
-                if existing[..start].trim().is_empty() {
-                    ""
-                } else {
-                    "\n\n"
-                },
-                block
-            ) + if existing[end..].trim().is_empty() {
-                "\n"
-            } else {
-                "\n\n"
-            } + existing[end..].trim_start()
-        } else {
-            format!("{}\n\n{}\n", existing.trim_end(), block)
-        }
-    } else if existing.trim().is_empty() {
-        format!("{block}\n")
-    } else {
-        format!("{}\n\n{}\n", existing.trim_end(), block)
-    };
-    let mut file = fs::File::create(path)?;
-    file.write_all(updated.as_bytes())?;
-    Ok(())
 }

@@ -10,6 +10,9 @@ mod source;
 mod snapshot;
 mod storage;
 mod retrieve;
+mod context;
+mod agents;
+mod install;
 mod app;
 
 fn main() {
