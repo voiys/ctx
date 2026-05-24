@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::constants::{DEFAULT_BUDGET_TOKENS, DEFAULT_TOP_K};
 
@@ -117,6 +118,8 @@ pub(crate) struct SnapshotMetadata {
     pub(crate) content_hash: String,
     pub(crate) page_count: usize,
     pub(crate) path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) extra: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

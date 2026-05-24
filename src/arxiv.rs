@@ -1,14 +1,51 @@
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use reqwest::StatusCode;
 use scraper::{Html, Selector};
+use serde_json::json;
 
 use crate::models::{ResourceKind, SnapshotMetadata, SnapshotPage};
-use crate::snapshot::write_snapshot_pages;
+use crate::snapshot::write_snapshot_pages_with_extra;
+
+pub(crate) trait ResearchPaperRegistry {
+    fn snapshot(
+        &self,
+        home: &Path,
+        resource_id: &str,
+        paper_id: &str,
+        url: &str,
+    ) -> Result<SnapshotMetadata>;
+}
+
+pub(crate) trait VersionedResearchPaperRegistry: ResearchPaperRegistry {
+    fn version(&self, paper: &ResearchPaper) -> Option<String>;
+}
+
+pub(crate) struct ArxivRegistry;
+
+impl ResearchPaperRegistry for ArxivRegistry {
+    fn snapshot(
+        &self,
+        home: &Path,
+        resource_id: &str,
+        arxiv_id: &str,
+        abs_url: &str,
+    ) -> Result<SnapshotMetadata> {
+        snapshot_arxiv(self, home, resource_id, arxiv_id, abs_url)
+    }
+}
+
+impl VersionedResearchPaperRegistry for ArxivRegistry {
+    fn version(&self, paper: &ResearchPaper) -> Option<String> {
+        paper.version.clone()
+    }
+}
 
 pub(crate) fn snapshot_arxiv(
-    home: &std::path::Path,
+    registry: &ArxivRegistry,
+    home: &Path,
     resource_id: &str,
     arxiv_id: &str,
     abs_url: &str,
@@ -36,12 +73,16 @@ pub(crate) fn snapshot_arxiv(
         });
     }
 
-    write_snapshot_pages(
+    write_snapshot_pages_with_extra(
         home,
         ResourceKind::ResearchPaper,
         resource_id,
         abs_url,
         pages,
+        Some(json!({
+            "registry": "arxiv",
+            "version": registry.version(&paper),
+        })),
     )
 }
 
@@ -59,8 +100,9 @@ fn fetch_optional(client: &reqwest::blocking::Client, url: &str) -> Result<Strin
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct ResearchPaper {
+pub(crate) struct ResearchPaper {
     id: String,
+    version: Option<String>,
     title: String,
     authors: Vec<String>,
     date: Option<String>,
@@ -74,6 +116,10 @@ impl ResearchPaper {
         text.push_str("Research paper\n\nRegistry: arXiv\n");
         text.push_str("ID: ");
         text.push_str(&self.id);
+        if let Some(version) = &self.version {
+            text.push_str("\nVersion: ");
+            text.push_str(version);
+        }
         text.push_str("\nTitle: ");
         text.push_str(&self.title);
         if !self.authors.is_empty() {
@@ -105,14 +151,37 @@ fn parse_abs_page(arxiv_id: &str, abs_url: &str, html: &str) -> Result<ResearchP
     let authors = meta_contents(&document, "citation_author");
     let date = meta_content(&document, "citation_date");
     let pdf_url = meta_content(&document, "citation_pdf_url");
+    let version =
+        arxiv_version_from_abs_page(&document).or_else(|| arxiv_version_from_id(arxiv_id));
     Ok(ResearchPaper {
         id: arxiv_id.to_string(),
+        version,
         title,
         authors,
         date,
         pdf_url,
         abstract_text,
     })
+}
+
+fn arxiv_version_from_abs_page(document: &Html) -> Option<String> {
+    meta_property(document, "og:url")
+        .as_deref()
+        .and_then(arxiv_version_from_id)
+}
+
+fn arxiv_version_from_id(value: &str) -> Option<String> {
+    let id = value
+        .trim_end_matches(".pdf")
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(value);
+    let version_start = id.rfind('v')?;
+    let version = &id[version_start..];
+    let digits = &version[1..];
+    (!digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit()))
+        .then(|| version.to_string())
 }
 
 fn arxiv_html_to_text(html: &str) -> Option<String> {
@@ -190,6 +259,7 @@ mod tests {
                 <meta name="citation_date" content="2017/06/12" />
                 <meta name="citation_pdf_url" content="https://arxiv.org/pdf/1706.03762" />
                 <meta name="citation_abstract" content="We propose the Transformer architecture." />
+                <meta property="og:url" content="https://arxiv.org/abs/1706.03762v7" />
             </head></html>
         "#;
 
@@ -199,6 +269,7 @@ mod tests {
             paper,
             ResearchPaper {
                 id: "1706.03762".to_string(),
+                version: Some("v7".to_string()),
                 title: "Attention Is All You Need".to_string(),
                 authors: vec!["Vaswani, Ashish".to_string(), "Shazeer, Noam".to_string()],
                 date: Some("2017/06/12".to_string()),
@@ -207,6 +278,17 @@ mod tests {
             }
         );
         assert!(paper.to_context_text().contains("Transformer architecture"));
+        assert!(paper.to_context_text().contains("Version: v7"));
+    }
+
+    #[test]
+    fn extracts_arxiv_version_from_ids_and_urls() {
+        assert_eq!(arxiv_version_from_id("1706.03762v7").as_deref(), Some("v7"));
+        assert_eq!(
+            arxiv_version_from_id("https://arxiv.org/pdf/1706.03762v7.pdf").as_deref(),
+            Some("v7")
+        );
+        assert_eq!(arxiv_version_from_id("1706.03762"), None);
     }
 
     #[test]

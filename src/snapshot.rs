@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use serde_json::Value;
 
 use crate::crawl::crawl_docs;
 use crate::models::{ResourceKind, SnapshotMetadata, SnapshotPage};
@@ -46,6 +47,17 @@ pub(crate) fn write_snapshot_pages(
     source_url: &str,
     pages: Vec<SnapshotPage>,
 ) -> Result<SnapshotMetadata> {
+    write_snapshot_pages_with_extra(home, kind, resource_id, source_url, pages, None)
+}
+
+pub(crate) fn write_snapshot_pages_with_extra(
+    home: &Path,
+    kind: ResourceKind,
+    resource_id: &str,
+    source_url: &str,
+    pages: Vec<SnapshotPage>,
+    extra: Option<Value>,
+) -> Result<SnapshotMetadata> {
     let mut hash_input = String::new();
     let mut combined = String::new();
     for page in &pages {
@@ -82,6 +94,7 @@ pub(crate) fn write_snapshot_pages(
         content_hash: format!("sha256:{hash}"),
         page_count: pages.len(),
         path: path.display().to_string(),
+        extra,
     };
     fs::write(
         path.join("snapshot.json"),

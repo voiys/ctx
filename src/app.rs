@@ -8,7 +8,7 @@ use serde_json::json;
 use url::Url;
 
 use crate::agents::upsert_agents_block;
-use crate::arxiv::snapshot_arxiv;
+use crate::arxiv::{ArxivRegistry, ResearchPaperRegistry as _};
 use crate::constants::{
     DEFAULT_BUDGET_TOKENS, DEFAULT_CRAWL_CONCURRENCY, DEFAULT_MAX_PAGES, DEFAULT_TOP_K,
 };
@@ -362,7 +362,9 @@ fn add(
                 research_paper_registry_name(registry)
             ));
             let snapshot = match registry {
-                ResearchPaperRegistry::Arxiv => snapshot_arxiv(&paths.home, &id, &arxiv_id, &url)?,
+                ResearchPaperRegistry::Arxiv => {
+                    ArxivRegistry.snapshot(&paths.home, &id, &arxiv_id, &url)?
+                }
             };
             let resource = Resource {
                 id,
@@ -493,7 +495,8 @@ fn update(
                 .url
                 .trim_start_matches("https://arxiv.org/abs/")
                 .to_string();
-            let snapshot = snapshot_arxiv(&paths.home, &resource.id, &arxiv_id, &resource.url)?;
+            let snapshot =
+                ArxivRegistry.snapshot(&paths.home, &resource.id, &arxiv_id, &resource.url)?;
             let changed = current_content_hash(&paths.db_path, &resource.id, &resource.current)?
                 .is_none_or(|hash| hash != snapshot.content_hash);
             if changed || force {
@@ -560,6 +563,7 @@ fn sync(cwd: Option<PathBuf>, reindex: bool) -> Result<()> {
                         .unwrap_or_default(),
                         page_count: 0,
                         path: path.clone(),
+                        extra: None,
                     };
                     index_snapshot(&paths.db_path, resource, &snapshot)?;
                 }

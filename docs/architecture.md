@@ -42,6 +42,8 @@ CLI -> AppContext -> manifest/cache/index services -> concrete implementations
 
 Only boundaries that are expected to change get a trait-like seam. Embeddings use `EmbeddingBackend` because local engines, external APIs, and disabled/BM25-only mode should be swappable without touching storage or retrieval command code.
 
+Research paper registries use the same pattern: every registry implements the base paper snapshot behavior, while registries with native version semantics can also implement the optional versioned-registry capability.
+
 ## Source vs Retrieval
 
 Source repositories are not RAG chunks in V1. They are pinned code trees.

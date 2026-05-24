@@ -787,6 +787,19 @@ fn live_arxiv_paper_can_be_added_and_queried() {
     assert!(list.contains("attention-paper"));
     assert!(list.contains(",research_paper,"));
 
+    let show = project
+        .ctx()
+        .args(["show", "attention-paper", "--snapshots", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let show = String::from_utf8(show).unwrap();
+    assert!(show.contains("registry: arxiv"));
+    assert!(show.contains("version: v"));
+
     let output = project
         .ctx()
         .args([

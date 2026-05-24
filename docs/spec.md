@@ -56,6 +56,8 @@ https://arxiv.org/html/1706.03762
 
 V1 normalizes arXiv paper URLs to the canonical abstract URL, snapshots citation metadata and abstract text, and indexes the arXiv HTML full text when arXiv provides it. Future registries should plug into the same `research_paper` resource kind.
 
+Research paper registries can optionally expose version metadata. arXiv does this through paper versions such as `v1` or `v7`; registries without version semantics do not need to implement that capability.
+
 ### Notes
 
 `file://` URLs may represent notes.
@@ -104,6 +106,7 @@ Docs, research papers, and notes snapshots should store enough metadata to make 
 - `content_hash`
 - `page_count`
 - `path`
+- optional `extra` metadata, such as a research paper registry name and registry version
 
 ## CLI Surface
 

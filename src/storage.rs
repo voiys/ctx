@@ -358,6 +358,8 @@ pub(crate) fn snapshots_for_resources(
              ORDER BY fetched_at DESC",
         )?;
         let rows = stmt.query_map(params![resource.id], |row| {
+            let path = row.get::<_, String>(6)?;
+            let extra = snapshot_extra(Path::new(&path)).ok().flatten();
             Ok(json!({
                 "resource_id": resource.id,
                 "label": resource.label,
@@ -367,7 +369,8 @@ pub(crate) fn snapshots_for_resources(
                 "content_hash": row.get::<_, String>(3)?,
                 "fetched_at": row.get::<_, String>(4)?,
                 "page_count": row.get::<_, i64>(5)?,
-                "path": row.get::<_, String>(6)?,
+                "path": path,
+                "extra": extra,
             }))
         })?;
         for row in rows {
@@ -375,6 +378,15 @@ pub(crate) fn snapshots_for_resources(
         }
     }
     Ok(out)
+}
+
+fn snapshot_extra(path: &Path) -> Result<Option<serde_json::Value>> {
+    let metadata_path = path.join("snapshot.json");
+    if !metadata_path.exists() {
+        return Ok(None);
+    }
+    let value = serde_json::from_str::<serde_json::Value>(&fs::read_to_string(metadata_path)?)?;
+    Ok(value.get("extra").cloned())
 }
 
 pub(crate) fn current_content_hash(
