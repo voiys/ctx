@@ -2,7 +2,6 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
@@ -11,7 +10,6 @@ use rayon::prelude::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
 use url::Url;
-use uuid::Uuid;
 
 use crate::constants::{
     AGENTS_BLOCK_END, AGENTS_BLOCK_START, DEFAULT_BUDGET_TOKENS, DEFAULT_CRAWL_CONCURRENCY,
@@ -31,9 +29,10 @@ use crate::models::{
     Resource, ResourceKind, RuntimePaths, SnapshotMetadata, SnapshotPage,
 };
 use crate::output::print_toon;
+use crate::source::{cache_github_source, validate_source_pointer};
 use crate::util::{
-    content_hash, default_label_for_url, kind_str, make_executable, path_size_bytes, run_command,
-    stable_id, timestamp,
+    content_hash, default_label_for_url, kind_str, make_executable, path_size_bytes, stable_id,
+    timestamp,
 };
 
 #[derive(Parser)]
@@ -774,51 +773,6 @@ fn ensure_project(paths: &RuntimePaths) -> Result<()> {
     Ok(())
 }
 
-fn cache_github_source(
-    home: &Path,
-    owner: &str,
-    repo: &str,
-    requested_ref: Option<&str>,
-    clone_url: &str,
-) -> Result<(String, PathBuf)> {
-    let tmp = home
-        .join("tmp")
-        .join(format!("{}-{}", repo, Uuid::new_v4()));
-    fs::create_dir_all(tmp.parent().unwrap())?;
-    let mut clone = Command::new("git");
-    clone.arg("clone").arg("--depth").arg("1");
-    if let Some(reference) = requested_ref {
-        clone.arg("--branch").arg(reference);
-    }
-    clone.arg(clone_url).arg(&tmp);
-    run_command(&mut clone, "git clone")?;
-
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&tmp)
-        .arg("rev-parse")
-        .arg("HEAD")
-        .output()
-        .context("failed to run git rev-parse")?;
-    if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    let commit = String::from_utf8(output.stdout)?.trim().to_string();
-    let final_path = home
-        .join("sources")
-        .join("github.com")
-        .join(owner)
-        .join(repo)
-        .join(&commit);
-    if final_path.exists() {
-        fs::remove_dir_all(&tmp)?;
-    } else {
-        fs::create_dir_all(final_path.parent().unwrap())?;
-        fs::rename(&tmp, &final_path)?;
-    }
-    Ok((commit, final_path))
-}
-
 fn snapshot_docs(
     home: &Path,
     resource_id: &str,
@@ -1425,13 +1379,6 @@ fn snapshot_path_for_pointer(
         )
         .optional()?;
     Ok(path)
-}
-
-fn validate_source_pointer(resource: &Resource, pointer: &str) -> Result<()> {
-    if resource.current == pointer {
-        return Ok(());
-    }
-    bail!("source pointer changes must be done by adding or caching an explicit GitHub ref first")
 }
 
 fn prune_resource_cache(db_path: &Path, resource: &Resource) -> Result<bool> {
