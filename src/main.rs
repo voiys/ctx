@@ -519,11 +519,12 @@ fn sync(cwd: Option<PathBuf>, reindex: bool) -> Result<()> {
                     .as_deref()
                     .map(Path::new)
                     .is_some_and(Path::exists);
-                if reindex && path_ready {
-                    if let Some(path) = &resource.local_path {
-                        let content = fs::read_to_string(Path::new(path).join("content.txt"))?;
-                        index_text(&paths.db_path, resource, &resource.current, &content)?;
-                    }
+                if reindex
+                    && path_ready
+                    && let Some(path) = &resource.local_path
+                {
+                    let content = fs::read_to_string(Path::new(path).join("content.txt"))?;
+                    index_text(&paths.db_path, resource, &resource.current, &content)?;
                 }
                 path_ready
             }
@@ -1462,11 +1463,8 @@ fn default_label_for_url(url: &str) -> String {
     Url::parse(url)
         .ok()
         .and_then(|url| {
-            url.host_str().map(|host| {
-                host.trim_start_matches("www.")
-                    .replace('.', "-")
-                    .replace(':', "-")
-            })
+            url.host_str()
+                .map(|host| host.trim_start_matches("www.").replace(['.', ':'], "-"))
         })
         .filter(|label| !label.is_empty())
         .unwrap_or_else(|| "resource".to_string())
