@@ -7,6 +7,7 @@ mod input;
 mod crawl;
 mod embeddings;
 mod source;
+mod snapshot;
 mod app;
 
 fn main() {

@@ -3,7 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use directories::UserDirs;
 use rayon::prelude::*;
@@ -15,7 +15,6 @@ use crate::constants::{
     AGENTS_BLOCK_END, AGENTS_BLOCK_START, DEFAULT_BUDGET_TOKENS, DEFAULT_CRAWL_CONCURRENCY,
     DEFAULT_MAX_PAGES, DEFAULT_TOP_K, RRF_K,
 };
-use crate::crawl::crawl_docs;
 use crate::embeddings::{
     EmbeddingBackend, EmbeddingService, bytes_to_embedding, cosine_similarity,
 };
@@ -30,9 +29,9 @@ use crate::models::{
 };
 use crate::output::print_toon;
 use crate::source::{cache_github_source, validate_source_pointer};
+use crate::snapshot::{snapshot_docs, snapshot_notes};
 use crate::util::{
-    content_hash, default_label_for_url, kind_str, make_executable, path_size_bytes, stable_id,
-    timestamp,
+    default_label_for_url, kind_str, make_executable, path_size_bytes, stable_id, timestamp,
 };
 
 #[derive(Parser)]
@@ -288,15 +287,7 @@ fn add(
         ResolvedInput::Docs { url } => {
             let label = label.unwrap_or_else(|| default_label_for_url(&url));
             let id = stable_id(&format!("docs:{url}:{label}"));
-            let snapshot = snapshot_docs(
-                &paths.home,
-                &id,
-                &url,
-                should_index,
-                &paths.db_path,
-                max_pages,
-                concurrency,
-            )?;
+            let snapshot = snapshot_docs(&paths.home, &id, &url, max_pages, concurrency)?;
             let resource = Resource {
                 id,
                 label,
@@ -322,8 +313,7 @@ fn add(
                     .to_string()
             });
             let id = stable_id(&format!("notes:{url}:{label}"));
-            let snapshot =
-                snapshot_notes(&paths.home, &id, &url, &path, should_index, &paths.db_path)?;
+            let snapshot = snapshot_notes(&paths.home, &id, &url, &path)?;
             let resource = Resource {
                 id,
                 label,
@@ -385,8 +375,6 @@ fn update(
                 &paths.home,
                 &resource.id,
                 &resource.url,
-                true,
-                &paths.db_path,
                 max_pages,
                 concurrency,
             )?;
@@ -418,14 +406,7 @@ fn update(
                 .ok()
                 .and_then(|url| url.to_file_path().ok())
                 .ok_or_else(|| anyhow!("notes URL is not a valid file URL"))?;
-            let snapshot = snapshot_notes(
-                &paths.home,
-                &resource.id,
-                &resource.url,
-                &file_path,
-                true,
-                &paths.db_path,
-            )?;
+            let snapshot = snapshot_notes(&paths.home, &resource.id, &resource.url, &file_path)?;
             let changed = current_content_hash(&paths.db_path, &resource.id, &resource.current)?
                 .is_none_or(|hash| hash != snapshot.content_hash);
             if changed || force {
@@ -771,104 +752,6 @@ fn ensure_project(paths: &RuntimePaths) -> Result<()> {
     fs::create_dir_all(&paths.home)?;
     ensure_db(&paths.db_path)?;
     Ok(())
-}
-
-fn snapshot_docs(
-    home: &Path,
-    resource_id: &str,
-    url: &str,
-    should_index: bool,
-    db_path: &Path,
-    max_pages: usize,
-    concurrency: usize,
-) -> Result<SnapshotMetadata> {
-    eprintln!("crawling docs: {url}");
-    let pages = crawl_docs(url, max_pages, concurrency)?;
-    write_snapshot_pages(
-        home,
-        ResourceKind::Docs,
-        resource_id,
-        url,
-        pages,
-        should_index,
-        db_path,
-    )
-}
-
-fn write_snapshot_pages(
-    home: &Path,
-    kind: ResourceKind,
-    resource_id: &str,
-    source_url: &str,
-    pages: Vec<SnapshotPage>,
-    _should_index: bool,
-    _db_path: &Path,
-) -> Result<SnapshotMetadata> {
-    let mut hash_input = String::new();
-    let mut combined = String::new();
-    for page in &pages {
-        hash_input.push_str(&page.url);
-        hash_input.push('\n');
-        hash_input.push_str(&page.content);
-        hash_input.push('\n');
-        combined.push_str("# ");
-        combined.push_str(&page.url);
-        combined.push_str("\n\n");
-        combined.push_str(&page.content);
-        combined.push_str("\n\n");
-    }
-    let hash = content_hash(&hash_input);
-    let fetched_at = timestamp();
-    let snapshot_id = format!("{}-{}", fetched_at.replace([':', '-'], ""), &hash[..12]);
-    let root = match kind {
-        ResourceKind::Docs => home.join("docs"),
-        ResourceKind::Notes => home.join("notes"),
-        ResourceKind::Source => bail!("source snapshots are not supported"),
-    };
-    let path = root.join(resource_id).join(&snapshot_id);
-    fs::create_dir_all(&path)?;
-    fs::write(path.join("content.txt"), &combined)?;
-    fs::write(
-        path.join("pages.json"),
-        serde_json::to_string_pretty(&pages)?,
-    )?;
-    let metadata = SnapshotMetadata {
-        snapshot_id,
-        fetched_at,
-        source_url: source_url.to_string(),
-        content_hash: format!("sha256:{hash}"),
-        page_count: pages.len(),
-        path: path.display().to_string(),
-    };
-    fs::write(
-        path.join("snapshot.json"),
-        serde_json::to_string_pretty(&metadata)?,
-    )?;
-    Ok(metadata)
-}
-
-fn snapshot_notes(
-    home: &Path,
-    resource_id: &str,
-    url: &str,
-    path: &Path,
-    should_index: bool,
-    db_path: &Path,
-) -> Result<SnapshotMetadata> {
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("failed to read notes file {}", path.display()))?;
-    write_snapshot_pages(
-        home,
-        ResourceKind::Notes,
-        resource_id,
-        url,
-        vec![SnapshotPage {
-            url: url.to_string(),
-            content: text,
-        }],
-        should_index,
-        db_path,
-    )
 }
 
 fn index_snapshot(db_path: &Path, resource: &Resource, snapshot: &SnapshotMetadata) -> Result<()> {
