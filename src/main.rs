@@ -369,6 +369,9 @@ fn add(
                 updated_at: now.clone(),
             };
             upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
+            if should_index {
+                index_snapshot(&paths.db_path, &resource, &snapshot)?;
+            }
             (resource, json!({"snapshot": snapshot}))
         }
         ResolvedInput::Notes { url, path } => {
@@ -393,6 +396,9 @@ fn add(
                 updated_at: now.clone(),
             };
             upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
+            if should_index {
+                index_snapshot(&paths.db_path, &resource, &snapshot)?;
+            }
             (resource, json!({"snapshot": snapshot}))
         }
     };
@@ -444,6 +450,7 @@ fn update(cwd: Option<PathBuf>, target: &str, force: bool) -> Result<()> {
                 manifest.resources[index] = resource.clone();
                 write_manifest(&paths.manifest_path, &manifest)?;
                 upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
+                index_snapshot(&paths.db_path, &resource, &snapshot)?;
             }
             print_toon(CommandStatus {
                 command: "update",
@@ -476,6 +483,7 @@ fn update(cwd: Option<PathBuf>, target: &str, force: bool) -> Result<()> {
                 manifest.resources[index] = resource.clone();
                 write_manifest(&paths.manifest_path, &manifest)?;
                 upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
+                index_snapshot(&paths.db_path, &resource, &snapshot)?;
             }
             print_toon(CommandStatus {
                 command: "update",
@@ -948,8 +956,8 @@ fn write_snapshot(
     resource_id: &str,
     source_url: &str,
     text: String,
-    should_index: bool,
-    db_path: &Path,
+    _should_index: bool,
+    _db_path: &Path,
 ) -> Result<SnapshotMetadata> {
     let hash = content_hash(&text);
     let fetched_at = timestamp();
@@ -974,21 +982,12 @@ fn write_snapshot(
         path.join("snapshot.json"),
         serde_json::to_string_pretty(&metadata)?,
     )?;
-    if should_index {
-        let resource = Resource {
-            id: resource_id.to_string(),
-            label: resource_id.to_string(),
-            kind,
-            url: source_url.to_string(),
-            reason: None,
-            current: metadata.snapshot_id.clone(),
-            local_path: Some(metadata.path.clone()),
-            created_at: metadata.fetched_at.clone(),
-            updated_at: metadata.fetched_at.clone(),
-        };
-        index_text(db_path, &resource, &metadata.snapshot_id, &text)?;
-    }
     Ok(metadata)
+}
+
+fn index_snapshot(db_path: &Path, resource: &Resource, snapshot: &SnapshotMetadata) -> Result<()> {
+    let content = fs::read_to_string(Path::new(&snapshot.path).join("content.txt"))?;
+    index_text(db_path, resource, &snapshot.snapshot_id, &content)
 }
 
 fn html_to_text(html: &str) -> String {
