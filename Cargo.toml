@@ -8,7 +8,9 @@ anyhow = "1.0.102"
 chrono = { version = "0.4.44", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
 directories = "6.0.0"
+fastembed = { version = "5.13.4", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 hex = "0.4.3"
+rayon = "1.12.0"
 reqwest = { version = "0.13.3", default-features = false, features = ["blocking", "rustls"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 scraper = "0.27.0"
@@ -19,3 +21,9 @@ thiserror = "2.0.18"
 toon-format = { version = "0.5.0", default-features = false }
 url = "2.5.8"
 uuid = { version = "1.23.1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+tempfile = "3.27.0"
+tiny_http = "0.12.0"

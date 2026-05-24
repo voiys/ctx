@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -8,6 +8,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{SecondsFormat, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use directories::UserDirs;
+use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
+use rayon::prelude::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
@@ -18,6 +20,10 @@ use uuid::Uuid;
 
 const DEFAULT_TOP_K: usize = 5;
 const DEFAULT_BUDGET_TOKENS: usize = 20_000;
+const DEFAULT_MAX_PAGES: usize = 256;
+const DEFAULT_CRAWL_CONCURRENCY: usize = 16;
+const EMBEDDING_BATCH_SIZE: usize = 64;
+const RRF_K: f64 = 60.0;
 const AGENTS_BLOCK_START: &str = "<!-- ctx:start -->";
 const AGENTS_BLOCK_END: &str = "<!-- ctx:end -->";
 
@@ -48,6 +54,10 @@ enum Commands {
         reason: Option<String>,
         #[arg(long)]
         no_index: bool,
+        #[arg(long, default_value_t = DEFAULT_MAX_PAGES)]
+        max_pages: usize,
+        #[arg(long, default_value_t = DEFAULT_CRAWL_CONCURRENCY)]
+        concurrency: usize,
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
@@ -56,6 +66,10 @@ enum Commands {
         target: String,
         #[arg(long)]
         force: bool,
+        #[arg(long, default_value_t = DEFAULT_MAX_PAGES)]
+        max_pages: usize,
+        #[arg(long, default_value_t = DEFAULT_CRAWL_CONCURRENCY)]
+        concurrency: usize,
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
@@ -124,6 +138,13 @@ enum Commands {
     Doctor {
         #[arg(long)]
         cwd: Option<PathBuf>,
+    },
+    /// Copy the current ctx binary into ~/.local/bin or a requested directory.
+    Install {
+        #[arg(long)]
+        bin_dir: Option<PathBuf>,
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -228,6 +249,34 @@ struct SnapshotMetadata {
     path: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct SnapshotPage {
+    url: String,
+    content: String,
+}
+
+#[derive(Clone, Debug)]
+struct CandidateBase {
+    chunk_id: i64,
+    resource_id: String,
+    snapshot_id: String,
+    kind: String,
+    label: String,
+    source_url: String,
+    chunk_index: i64,
+    content: String,
+}
+
+#[derive(Clone, Debug)]
+struct CandidateScore {
+    base: CandidateBase,
+    final_score: f64,
+    lexical_rank: Option<usize>,
+    lexical_score: Option<f64>,
+    vector_rank: Option<usize>,
+    vector_score: Option<f64>,
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("error: {error:#}");
@@ -244,9 +293,17 @@ fn run() -> Result<()> {
             label,
             reason,
             no_index,
+            max_pages,
+            concurrency,
             cwd,
-        } => add(cwd, &url, label, reason, !no_index),
-        Commands::Update { target, force, cwd } => update(cwd, &target, force),
+        } => add(cwd, &url, label, reason, !no_index, max_pages, concurrency),
+        Commands::Update {
+            target,
+            force,
+            max_pages,
+            concurrency,
+            cwd,
+        } => update(cwd, &target, force, max_pages, concurrency),
         Commands::Sync { reindex, cwd } => sync(cwd, reindex),
         Commands::Query {
             question,
@@ -275,6 +332,7 @@ fn run() -> Result<()> {
             cwd,
         } => remove(cwd, &target, prune_cache),
         Commands::Doctor { cwd } => doctor(cwd),
+        Commands::Install { bin_dir, force } => install(bin_dir, force),
     }
 }
 
@@ -316,6 +374,8 @@ fn add(
     label: Option<String>,
     reason: Option<String>,
     should_index: bool,
+    max_pages: usize,
+    concurrency: usize,
 ) -> Result<()> {
     let paths = runtime_paths(cwd)?;
     ensure_project(&paths)?;
@@ -356,7 +416,15 @@ fn add(
         ResolvedInput::Docs { url } => {
             let label = label.unwrap_or_else(|| default_label_for_url(&url));
             let id = stable_id(&format!("docs:{url}:{label}"));
-            let snapshot = snapshot_docs(&paths.home, &id, &url, should_index, &paths.db_path)?;
+            let snapshot = snapshot_docs(
+                &paths.home,
+                &id,
+                &url,
+                should_index,
+                &paths.db_path,
+                max_pages,
+                concurrency,
+            )?;
             let resource = Resource {
                 id,
                 label,
@@ -416,7 +484,13 @@ fn add(
     })
 }
 
-fn update(cwd: Option<PathBuf>, target: &str, force: bool) -> Result<()> {
+fn update(
+    cwd: Option<PathBuf>,
+    target: &str,
+    force: bool,
+    max_pages: usize,
+    concurrency: usize,
+) -> Result<()> {
     let paths = runtime_paths(cwd)?;
     ensure_project(&paths)?;
     let mut manifest = read_manifest(&paths.manifest_path)?;
@@ -441,6 +515,8 @@ fn update(cwd: Option<PathBuf>, target: &str, force: bool) -> Result<()> {
                 &resource.url,
                 true,
                 &paths.db_path,
+                max_pages,
+                concurrency,
             )?;
             let changed = current_content_hash(&paths.db_path, &resource.id, &resource.current)?
                 .is_none_or(|hash| hash != snapshot.content_hash);
@@ -529,8 +605,20 @@ fn sync(cwd: Option<PathBuf>, reindex: bool) -> Result<()> {
                     && path_ready
                     && let Some(path) = &resource.local_path
                 {
-                    let content = fs::read_to_string(Path::new(path).join("content.txt"))?;
-                    index_text(&paths.db_path, resource, &resource.current, &content)?;
+                    let snapshot = SnapshotMetadata {
+                        snapshot_id: resource.current.clone(),
+                        fetched_at: resource.updated_at.clone(),
+                        source_url: resource.url.clone(),
+                        content_hash: current_content_hash(
+                            &paths.db_path,
+                            &resource.id,
+                            &resource.current,
+                        )?
+                        .unwrap_or_default(),
+                        page_count: 0,
+                        path: path.clone(),
+                    };
+                    index_snapshot(&paths.db_path, resource, &snapshot)?;
                 }
                 path_ready
             }
@@ -674,6 +762,15 @@ fn use_pointer(cwd: Option<PathBuf>, label: &str, pointer: &str) -> Result<()> {
     ensure_project(&paths)?;
     let mut manifest = read_manifest(&paths.manifest_path)?;
     let index = find_manifest_resource_index(&manifest, label)?;
+    match manifest.resources[index].kind {
+        ResourceKind::Source => validate_source_pointer(&manifest.resources[index], pointer)?,
+        ResourceKind::Docs | ResourceKind::Notes => {
+            let snapshot_path =
+                snapshot_path_for_pointer(&paths.db_path, &manifest.resources[index].id, pointer)?
+                    .ok_or_else(|| anyhow!("snapshot not found for {}: {pointer}", label))?;
+            manifest.resources[index].local_path = Some(snapshot_path);
+        }
+    }
     manifest.resources[index].current = pointer.to_string();
     manifest.resources[index].updated_at = timestamp();
     write_manifest(&paths.manifest_path, &manifest)?;
@@ -690,6 +787,7 @@ fn remove(cwd: Option<PathBuf>, target: &str, prune_cache: bool) -> Result<()> {
     let paths = runtime_paths(cwd)?;
     ensure_project(&paths)?;
     let mut manifest = read_manifest(&paths.manifest_path)?;
+    let removed = find_manifest_resource(&manifest, target)?.clone();
     let before = manifest.resources.len();
     manifest.resources.retain(|resource| {
         resource.label != target && resource.url != target && resource.id != target
@@ -698,13 +796,18 @@ fn remove(cwd: Option<PathBuf>, target: &str, prune_cache: bool) -> Result<()> {
         bail!("resource not found: {target}");
     }
     write_manifest(&paths.manifest_path, &manifest)?;
+    let pruned = if prune_cache {
+        prune_resource_cache(&paths.db_path, &removed)?
+    } else {
+        false
+    };
     print_toon(CommandStatus {
         command: "remove",
         status: "ok",
         result: json!({
             "target": target,
             "prune_cache_requested": prune_cache,
-            "prune_cache_implemented": false,
+            "pruned_cache": pruned,
         }),
     })
 }
@@ -730,6 +833,36 @@ fn doctor(cwd: Option<PathBuf>) -> Result<()> {
             "db_path": paths.db_path,
             "db_ok": db_ok,
             "project_resource_count": resource_count,
+        }),
+    })
+}
+
+fn install(bin_dir: Option<PathBuf>, force: bool) -> Result<()> {
+    let target_dir = match bin_dir {
+        Some(path) => path,
+        None => UserDirs::new()
+            .ok_or_else(|| anyhow!("could not determine home directory"))?
+            .home_dir()
+            .join(".local")
+            .join("bin"),
+    };
+    fs::create_dir_all(&target_dir)?;
+    let target = target_dir.join("ctx");
+    if target.exists() && !force {
+        bail!(
+            "{} already exists; pass --force to replace it",
+            target.display()
+        );
+    }
+    let current = std::env::current_exe()?;
+    fs::copy(&current, &target)?;
+    make_executable(&target)?;
+    print_toon(CommandStatus {
+        command: "install",
+        status: "ok",
+        result: json!({
+            "source": current,
+            "target": target,
         }),
     })
 }
@@ -915,25 +1048,197 @@ fn snapshot_docs(
     url: &str,
     should_index: bool,
     db_path: &Path,
+    max_pages: usize,
+    concurrency: usize,
 ) -> Result<SnapshotMetadata> {
-    eprintln!("fetching docs: {url}");
-    let html = reqwest::blocking::Client::builder()
-        .user_agent("ctx/0.1")
-        .build()?
-        .get(url)
-        .send()?
-        .error_for_status()?
-        .text()?;
-    let text = html_to_text(&html);
-    write_snapshot(
+    eprintln!("crawling docs: {url}");
+    let pages = crawl_docs(url, max_pages, concurrency)?;
+    write_snapshot_pages(
         home,
         ResourceKind::Docs,
         resource_id,
         url,
-        text,
+        pages,
         should_index,
         db_path,
     )
+}
+
+fn crawl_docs(seed: &str, max_pages: usize, concurrency: usize) -> Result<Vec<SnapshotPage>> {
+    let seed_url = Url::parse(seed)?;
+    let max_pages = max_pages.max(1);
+    let concurrency = concurrency.max(1);
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("ctx/0.1")
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(concurrency)
+        .build()?;
+    let mut seen = HashSet::from([canonical_url(&seed_url)]);
+    let mut frontier = vec![seed_url.clone()];
+    let mut pages = Vec::new();
+
+    while !frontier.is_empty() && pages.len() < max_pages {
+        let remaining = max_pages - pages.len();
+        let batch = frontier.into_iter().take(remaining).collect::<Vec<_>>();
+        let fetched = pool.install(|| {
+            batch
+                .par_iter()
+                .filter_map(|url| fetch_doc_page(&client, url).ok())
+                .collect::<Vec<_>>()
+        });
+        let mut next = BTreeSet::new();
+        for fetched_page in fetched {
+            let page_url = fetched_page.url.clone();
+            for link in &fetched_page.links {
+                if is_crawlable_doc_url(&seed_url, link) {
+                    let canonical = canonical_url(link);
+                    if seen.insert(canonical.clone()) {
+                        next.insert(canonical);
+                    }
+                }
+            }
+            pages.push(SnapshotPage {
+                url: page_url,
+                content: fetched_page.text,
+            });
+            if pages.len() >= max_pages {
+                break;
+            }
+        }
+        frontier = next
+            .into_iter()
+            .filter_map(|value| Url::parse(&value).ok())
+            .collect();
+    }
+
+    if pages.is_empty() {
+        bail!("no crawlable docs pages were fetched from {seed}");
+    }
+    Ok(pages)
+}
+
+struct FetchedDocPage {
+    url: String,
+    text: String,
+    links: Vec<Url>,
+}
+
+fn fetch_doc_page(client: &reqwest::blocking::Client, url: &Url) -> Result<FetchedDocPage> {
+    eprintln!("fetching docs page: {url}");
+    let html = client.get(url.clone()).send()?.error_for_status()?.text()?;
+    let links = html_links(url, &html);
+    Ok(FetchedDocPage {
+        url: canonical_url(url),
+        text: html_to_text(&html),
+        links,
+    })
+}
+
+fn html_links(base: &Url, html: &str) -> Vec<Url> {
+    let document = Html::parse_document(html);
+    let selector = Selector::parse("a[href]").expect("static selector");
+    document
+        .select(&selector)
+        .filter_map(|node| node.value().attr("href"))
+        .filter_map(|href| base.join(href).ok())
+        .map(strip_fragment_and_query)
+        .collect()
+}
+
+fn is_crawlable_doc_url(seed: &Url, candidate: &Url) -> bool {
+    if candidate.scheme() != seed.scheme()
+        || candidate.host_str() != seed.host_str()
+        || candidate.port_or_known_default() != seed.port_or_known_default()
+    {
+        return false;
+    }
+    let seed_path = normalized_crawl_root(seed.path());
+    if !candidate.path().starts_with(&seed_path) {
+        return false;
+    }
+    !looks_like_asset(candidate.path())
+}
+
+fn normalized_crawl_root(path: &str) -> String {
+    if path == "/" || path.is_empty() {
+        "/".to_string()
+    } else {
+        format!("{}/", path.trim_end_matches('/'))
+    }
+}
+
+fn looks_like_asset(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".css", ".js", ".mjs", ".map",
+        ".pdf", ".zip", ".tar", ".gz", ".mp4", ".webm", ".woff", ".woff2", ".ttf",
+    ]
+    .iter()
+    .any(|suffix| lower.ends_with(suffix))
+}
+
+fn strip_fragment_and_query(mut url: Url) -> Url {
+    url.set_fragment(None);
+    url.set_query(None);
+    url
+}
+
+fn canonical_url(url: &Url) -> String {
+    strip_fragment_and_query(url.clone()).to_string()
+}
+
+fn write_snapshot_pages(
+    home: &Path,
+    kind: ResourceKind,
+    resource_id: &str,
+    source_url: &str,
+    pages: Vec<SnapshotPage>,
+    _should_index: bool,
+    _db_path: &Path,
+) -> Result<SnapshotMetadata> {
+    let mut hash_input = String::new();
+    let mut combined = String::new();
+    for page in &pages {
+        hash_input.push_str(&page.url);
+        hash_input.push('\n');
+        hash_input.push_str(&page.content);
+        hash_input.push('\n');
+        combined.push_str("# ");
+        combined.push_str(&page.url);
+        combined.push_str("\n\n");
+        combined.push_str(&page.content);
+        combined.push_str("\n\n");
+    }
+    let hash = content_hash(&hash_input);
+    let fetched_at = timestamp();
+    let snapshot_id = format!("{}-{}", fetched_at.replace([':', '-'], ""), &hash[..12]);
+    let root = match kind {
+        ResourceKind::Docs => home.join("docs"),
+        ResourceKind::Notes => home.join("notes"),
+        ResourceKind::Source => bail!("source snapshots are not supported"),
+    };
+    let path = root.join(resource_id).join(&snapshot_id);
+    fs::create_dir_all(&path)?;
+    fs::write(path.join("content.txt"), &combined)?;
+    fs::write(
+        path.join("pages.json"),
+        serde_json::to_string_pretty(&pages)?,
+    )?;
+    let metadata = SnapshotMetadata {
+        snapshot_id,
+        fetched_at,
+        source_url: source_url.to_string(),
+        content_hash: format!("sha256:{hash}"),
+        page_count: pages.len(),
+        path: path.display().to_string(),
+    };
+    fs::write(
+        path.join("snapshot.json"),
+        serde_json::to_string_pretty(&metadata)?,
+    )?;
+    Ok(metadata)
 }
 
 fn snapshot_notes(
@@ -946,55 +1251,182 @@ fn snapshot_notes(
 ) -> Result<SnapshotMetadata> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("failed to read notes file {}", path.display()))?;
-    write_snapshot(
+    write_snapshot_pages(
         home,
         ResourceKind::Notes,
         resource_id,
         url,
-        text,
+        vec![SnapshotPage {
+            url: url.to_string(),
+            content: text,
+        }],
         should_index,
         db_path,
     )
 }
 
-fn write_snapshot(
-    home: &Path,
-    kind: ResourceKind,
-    resource_id: &str,
-    source_url: &str,
-    text: String,
-    _should_index: bool,
-    _db_path: &Path,
-) -> Result<SnapshotMetadata> {
-    let hash = content_hash(&text);
-    let fetched_at = timestamp();
-    let snapshot_id = format!("{}-{}", fetched_at.replace([':', '-'], ""), &hash[..12]);
-    let root = match kind {
-        ResourceKind::Docs => home.join("docs"),
-        ResourceKind::Notes => home.join("notes"),
-        ResourceKind::Source => bail!("source snapshots are not supported"),
+fn index_snapshot(db_path: &Path, resource: &Resource, snapshot: &SnapshotMetadata) -> Result<()> {
+    let pages_path = Path::new(&snapshot.path).join("pages.json");
+    let pages = if pages_path.exists() {
+        serde_json::from_str::<Vec<SnapshotPage>>(&fs::read_to_string(pages_path)?)?
+    } else {
+        vec![SnapshotPage {
+            url: snapshot.source_url.clone(),
+            content: fs::read_to_string(Path::new(&snapshot.path).join("content.txt"))?,
+        }]
     };
-    let path = root.join(resource_id).join(&snapshot_id);
-    fs::create_dir_all(&path)?;
-    fs::write(path.join("content.txt"), &text)?;
-    let metadata = SnapshotMetadata {
-        snapshot_id,
-        fetched_at,
-        source_url: source_url.to_string(),
-        content_hash: format!("sha256:{hash}"),
-        page_count: 1,
-        path: path.display().to_string(),
-    };
-    fs::write(
-        path.join("snapshot.json"),
-        serde_json::to_string_pretty(&metadata)?,
-    )?;
-    Ok(metadata)
+    index_pages(db_path, resource, &snapshot.snapshot_id, &pages)
 }
 
-fn index_snapshot(db_path: &Path, resource: &Resource, snapshot: &SnapshotMetadata) -> Result<()> {
-    let content = fs::read_to_string(Path::new(&snapshot.path).join("content.txt"))?;
-    index_text(db_path, resource, &snapshot.snapshot_id, &content)
+fn index_pages(
+    db_path: &Path,
+    resource: &Resource,
+    snapshot_id: &str,
+    pages: &[SnapshotPage],
+) -> Result<()> {
+    ensure_db(db_path)?;
+    let mut conn = Connection::open(db_path)?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM chunks WHERE resource_id = ?1 AND snapshot_id = ?2",
+        params![resource.id, snapshot_id],
+    )?;
+    tx.execute(
+        "DELETE FROM chunks_fts WHERE resource_id = ?1 AND snapshot_id = ?2",
+        params![resource.id, snapshot_id],
+    )?;
+
+    let mut chunks = pages
+        .par_iter()
+        .enumerate()
+        .flat_map(|(page_index, page)| {
+            chunk_text(&page.content, 2_400)
+                .into_iter()
+                .enumerate()
+                .map(move |(chunk_index, content)| {
+                    (page_index, chunk_index, page.url.clone(), content)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    chunks.sort_by_key(|(page_index, chunk_index, _, _)| (*page_index, *chunk_index));
+
+    let contents = chunks
+        .iter()
+        .map(|(_, _, _, content)| content.clone())
+        .collect::<Vec<_>>();
+    let embeddings = if embeddings_enabled() {
+        embed_passages(db_path, &contents)?
+    } else {
+        vec![None; contents.len()]
+    };
+
+    for (global_index, ((_, _, source_url, content), embedding)) in
+        chunks.iter().zip(embeddings.iter()).enumerate()
+    {
+        tx.execute(
+            "INSERT INTO chunks(resource_id, snapshot_id, kind, label, source_url, chunk_index, content, embedding)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                resource.id,
+                snapshot_id,
+                kind_str(resource.kind),
+                resource.label,
+                source_url,
+                global_index as i64,
+                content,
+                embedding
+            ],
+        )?;
+        let rowid = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO chunks_fts(rowid, content, resource_id, snapshot_id, label)
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![rowid, content, resource.id, snapshot_id, resource.label],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn embeddings_enabled() -> bool {
+    std::env::var("CTX_EMBEDDINGS")
+        .map(|value| !matches!(value.as_str(), "0" | "false" | "off" | "no"))
+        .unwrap_or(true)
+}
+
+fn embed_passages(db_path: &Path, contents: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+    if contents.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut model = embedding_model(db_path)?;
+    let mut out = Vec::with_capacity(contents.len());
+    for batch in contents.chunks(EMBEDDING_BATCH_SIZE) {
+        let inputs = batch
+            .iter()
+            .map(|content| format!("passage: {content}"))
+            .collect::<Vec<_>>();
+        let embeddings = model.embed(inputs, None)?;
+        out.extend(
+            embeddings
+                .into_iter()
+                .map(|embedding| Some(embedding_to_bytes(&embedding))),
+        );
+    }
+    Ok(out)
+}
+
+fn embed_query(db_path: &Path, question: &str) -> Result<Vec<f32>> {
+    let mut model = embedding_model(db_path)?;
+    let embeddings = model.embed(vec![format!("query: {question}")], None)?;
+    embeddings
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("embedding model returned no query embedding"))
+}
+
+fn embedding_model(db_path: &Path) -> Result<TextEmbedding> {
+    let models_dir = db_path
+        .parent()
+        .ok_or_else(|| anyhow!("database path has no parent"))?
+        .join("models");
+    fs::create_dir_all(&models_dir)?;
+    let options = TextInitOptions::new(EmbeddingModel::AllMiniLML6V2Q)
+        .with_cache_dir(models_dir)
+        .with_show_download_progress(false);
+    TextEmbedding::try_new(options)
+}
+
+fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
+    embedding
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+fn bytes_to_embedding(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+    let mut dot = 0.0f64;
+    let mut a_norm = 0.0f64;
+    let mut b_norm = 0.0f64;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let x = *x as f64;
+        let y = *y as f64;
+        dot += x * y;
+        a_norm += x * x;
+        b_norm += y * y;
+    }
+    if a_norm == 0.0 || b_norm == 0.0 {
+        0.0
+    } else {
+        dot / (a_norm.sqrt() * b_norm.sqrt())
+    }
 }
 
 fn html_to_text(html: &str) -> String {
@@ -1052,7 +1484,8 @@ fn ensure_db(path: &Path) -> Result<()> {
             label TEXT NOT NULL,
             source_url TEXT NOT NULL,
             chunk_index INTEGER NOT NULL,
-            content TEXT NOT NULL
+            content TEXT NOT NULL,
+            embedding BLOB
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
             content,
@@ -1062,6 +1495,20 @@ fn ensure_db(path: &Path) -> Result<()> {
         );
         ",
     )?;
+    ensure_embedding_column(&conn)?;
+    Ok(())
+}
+
+fn ensure_embedding_column(conn: &Connection) -> Result<()> {
+    let has_embedding = conn
+        .prepare("PRAGMA table_info(chunks)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .iter()
+        .any(|name| name == "embedding");
+    if !has_embedding {
+        conn.execute("ALTER TABLE chunks ADD COLUMN embedding BLOB", [])?;
+    }
     Ok(())
 }
 
@@ -1111,44 +1558,6 @@ fn upsert_global_resource(
     Ok(())
 }
 
-fn index_text(db_path: &Path, resource: &Resource, snapshot_id: &str, text: &str) -> Result<()> {
-    ensure_db(db_path)?;
-    let mut conn = Connection::open(db_path)?;
-    let tx = conn.transaction()?;
-    tx.execute(
-        "DELETE FROM chunks WHERE resource_id = ?1 AND snapshot_id = ?2",
-        params![resource.id, snapshot_id],
-    )?;
-    tx.execute(
-        "DELETE FROM chunks_fts WHERE resource_id = ?1 AND snapshot_id = ?2",
-        params![resource.id, snapshot_id],
-    )?;
-    let chunks = chunk_text(text, 2_400);
-    for (index, chunk) in chunks.iter().enumerate() {
-        tx.execute(
-            "INSERT INTO chunks(resource_id, snapshot_id, kind, label, source_url, chunk_index, content)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                resource.id,
-                snapshot_id,
-                kind_str(resource.kind),
-                resource.label,
-                resource.url,
-                index as i64,
-                chunk
-            ],
-        )?;
-        let rowid = tx.last_insert_rowid();
-        tx.execute(
-            "INSERT INTO chunks_fts(rowid, content, resource_id, snapshot_id, label)
-             VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![rowid, chunk, resource.id, snapshot_id, resource.label],
-        )?;
-    }
-    tx.commit()?;
-    Ok(())
-}
-
 fn query_index(
     db_path: &Path,
     question: &str,
@@ -1160,6 +1569,65 @@ fn query_index(
     if allowed_resource_ids.is_empty() || top_k == 0 {
         return Ok(Vec::new());
     }
+    let lexical = lexical_candidates(db_path, question, allowed_resource_ids, top_k.max(50) * 10)?;
+    let vector = if embeddings_enabled() {
+        vector_candidates(db_path, question, allowed_resource_ids, top_k.max(50) * 10)?
+    } else {
+        Vec::new()
+    };
+    let fused = fuse_candidates(lexical, vector);
+    let matched_tokens = tokenize(question);
+    let mut out = Vec::new();
+    let mut used_tokens = 0usize;
+    let mut seen = BTreeSet::new();
+    for candidate in fused {
+        if !seen.insert((
+            candidate.base.resource_id.clone(),
+            candidate.base.chunk_index,
+        )) {
+            continue;
+        }
+        let estimated = estimate_tokens(&candidate.base.content);
+        if used_tokens + estimated > budget_tokens && !out.is_empty() {
+            break;
+        }
+        used_tokens += estimated;
+        let mut item = json!({
+            "rank": out.len() + 1,
+            "kind": candidate.base.kind,
+            "label": candidate.base.label,
+            "content": candidate.base.content,
+            "citation": candidate.base.source_url,
+            "snapshot_id": candidate.base.snapshot_id,
+            "score": candidate.final_score,
+        });
+        if debug {
+            item["debug"] = json!({
+                "retrieval": if candidate.vector_rank.is_some() { "rrf_hybrid" } else { "fts5_bm25" },
+                "chunk_id": candidate.base.chunk_id,
+                "chunk_index": candidate.base.chunk_index,
+                "matched_tokens": matched_tokens,
+                "lexical_rank": candidate.lexical_rank,
+                "lexical_score": candidate.lexical_score,
+                "vector_rank": candidate.vector_rank,
+                "vector_score": candidate.vector_score,
+                "rrf_score": candidate.final_score,
+            });
+        }
+        out.push(item);
+        if out.len() >= top_k {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+fn lexical_candidates(
+    db_path: &Path,
+    question: &str,
+    allowed_resource_ids: &BTreeSet<String>,
+    limit: usize,
+) -> Result<Vec<(CandidateBase, f64)>> {
     let fts_query = fts_query(question);
     if fts_query.is_empty() {
         return Ok(Vec::new());
@@ -1174,70 +1642,122 @@ fn query_index(
          ORDER BY bm25(chunks_fts)
          LIMIT ?2",
     )?;
-    let rows = stmt.query_map(params![fts_query, (top_k.max(20) * 10) as i64], |row| {
+    let rows = stmt.query_map(params![fts_query, limit as i64], |row| {
         Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, i64>(6)?,
-            row.get::<_, String>(7)?,
+            CandidateBase {
+                chunk_id: row.get(0)?,
+                resource_id: row.get(1)?,
+                snapshot_id: row.get(2)?,
+                kind: row.get(3)?,
+                label: row.get(4)?,
+                source_url: row.get(5)?,
+                chunk_index: row.get(6)?,
+                content: row.get(7)?,
+            },
             row.get::<_, f64>(8)?,
         ))
     })?;
-
     let mut out = Vec::new();
-    let mut used_tokens = 0usize;
-    let mut seen = BTreeSet::new();
-    let matched_tokens = tokenize(question);
     for row in rows {
-        let (
-            chunk_id,
-            resource_id,
-            snapshot_id,
-            kind,
-            label,
-            source_url,
-            chunk_index,
-            content,
-            score,
-        ) = row?;
-        if !allowed_resource_ids.contains(&resource_id)
-            || !seen.insert((resource_id.clone(), chunk_index))
-        {
-            continue;
-        }
-        let estimated = estimate_tokens(&content);
-        if used_tokens + estimated > budget_tokens && !out.is_empty() {
-            break;
-        }
-        used_tokens += estimated;
-        let mut item = json!({
-            "rank": out.len() + 1,
-            "kind": kind,
-            "label": label,
-            "content": content,
-            "citation": source_url,
-            "snapshot_id": snapshot_id,
-            "score": score,
-        });
-        if debug {
-            item["debug"] = json!({
-                "retrieval": "fts5_bm25",
-                "chunk_id": chunk_id,
-                "chunk_index": chunk_index,
-                "matched_tokens": matched_tokens,
-                "lexical_score": score,
-            });
-        }
-        out.push(item);
-        if out.len() >= top_k {
-            break;
+        let (base, score) = row?;
+        if allowed_resource_ids.contains(&base.resource_id) {
+            out.push((base, score));
         }
     }
     Ok(out)
+}
+
+fn vector_candidates(
+    db_path: &Path,
+    question: &str,
+    allowed_resource_ids: &BTreeSet<String>,
+    limit: usize,
+) -> Result<Vec<(CandidateBase, f64)>> {
+    let conn = Connection::open(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, resource_id, snapshot_id, kind, label, source_url, chunk_index, content, embedding
+         FROM chunks
+         WHERE embedding IS NOT NULL AND LENGTH(embedding) > 0",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            CandidateBase {
+                chunk_id: row.get(0)?,
+                resource_id: row.get(1)?,
+                snapshot_id: row.get(2)?,
+                kind: row.get(3)?,
+                label: row.get(4)?,
+                source_url: row.get(5)?,
+                chunk_index: row.get(6)?,
+                content: row.get(7)?,
+            },
+            row.get::<_, Vec<u8>>(8)?,
+        ))
+    })?;
+    let mut chunks = Vec::new();
+    for row in rows {
+        let (base, embedding) = row?;
+        if allowed_resource_ids.contains(&base.resource_id) {
+            chunks.push((base, embedding));
+        }
+    }
+    if chunks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let query_embedding = embed_query(db_path, question)?;
+    let mut scored = chunks
+        .into_par_iter()
+        .map(|(base, bytes)| {
+            let embedding = bytes_to_embedding(&bytes);
+            let score = cosine_similarity(&query_embedding, &embedding);
+            (base, score)
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(limit);
+    Ok(scored)
+}
+
+fn fuse_candidates(
+    lexical: Vec<(CandidateBase, f64)>,
+    vector: Vec<(CandidateBase, f64)>,
+) -> Vec<CandidateScore> {
+    let mut by_chunk: HashMap<i64, CandidateScore> = HashMap::new();
+    for (rank, (base, score)) in lexical.into_iter().enumerate() {
+        let rank = rank + 1;
+        let entry = by_chunk.entry(base.chunk_id).or_insert(CandidateScore {
+            base,
+            final_score: 0.0,
+            lexical_rank: None,
+            lexical_score: None,
+            vector_rank: None,
+            vector_score: None,
+        });
+        entry.final_score += 1.0 / (RRF_K + rank as f64);
+        entry.lexical_rank = Some(rank);
+        entry.lexical_score = Some(score);
+    }
+    for (rank, (base, score)) in vector.into_iter().enumerate() {
+        let rank = rank + 1;
+        let entry = by_chunk.entry(base.chunk_id).or_insert(CandidateScore {
+            base,
+            final_score: 0.0,
+            lexical_rank: None,
+            lexical_score: None,
+            vector_rank: None,
+            vector_score: None,
+        });
+        entry.final_score += 1.0 / (RRF_K + rank as f64);
+        entry.vector_rank = Some(rank);
+        entry.vector_score = Some(score);
+    }
+    let mut out = by_chunk.into_values().collect::<Vec<_>>();
+    out.sort_by(|a, b| {
+        b.final_score
+            .partial_cmp(&a.final_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out
 }
 
 fn list_global_resources(
@@ -1327,6 +1847,75 @@ fn current_content_hash(
         )
         .optional()?;
     Ok(hash)
+}
+
+fn snapshot_path_for_pointer(
+    db_path: &Path,
+    resource_id: &str,
+    snapshot_id: &str,
+) -> Result<Option<String>> {
+    ensure_db(db_path)?;
+    let conn = Connection::open(db_path)?;
+    let path = conn
+        .query_row(
+            "SELECT path FROM snapshots WHERE resource_id = ?1 AND snapshot_id = ?2",
+            params![resource_id, snapshot_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(path)
+}
+
+fn validate_source_pointer(resource: &Resource, pointer: &str) -> Result<()> {
+    if resource.current == pointer {
+        return Ok(());
+    }
+    bail!("source pointer changes must be done by adding or caching an explicit GitHub ref first")
+}
+
+fn prune_resource_cache(db_path: &Path, resource: &Resource) -> Result<bool> {
+    ensure_db(db_path)?;
+    if let Some(path) = &resource.local_path {
+        let path = Path::new(path);
+        if path.exists() {
+            let _ = fs::remove_dir_all(path);
+        }
+        if let Some(parent) = path.parent()
+            && parent.exists()
+            && fs::read_dir(parent)?.next().is_none()
+        {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+    let conn = Connection::open(db_path)?;
+    conn.execute(
+        "DELETE FROM chunks_fts WHERE resource_id = ?1",
+        params![resource.id],
+    )?;
+    conn.execute(
+        "DELETE FROM chunks WHERE resource_id = ?1",
+        params![resource.id],
+    )?;
+    conn.execute(
+        "DELETE FROM snapshots WHERE resource_id = ?1",
+        params![resource.id],
+    )?;
+    conn.execute("DELETE FROM resources WHERE id = ?1", params![resource.id])?;
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn allowed_resource_ids(
