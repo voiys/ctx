@@ -179,7 +179,7 @@ fn global_notes_can_be_used_without_project_manifest() {
 }
 
 #[test]
-fn project_add_links_global_resource_when_manifest_exists() {
+fn project_link_adds_existing_global_resource_to_manifest() {
     let project = TestProject::new();
     let note_path = project.root.path().join("project-notes.md");
     fs::write(
@@ -194,7 +194,7 @@ fn project_add_links_global_resource_when_manifest_exists() {
         .arg(project.root.path())
         .assert()
         .success();
-    let add = project
+    project
         .ctx()
         .arg("add")
         .arg(format!("file://{}", note_path.display()))
@@ -202,15 +202,30 @@ fn project_add_links_global_resource_when_manifest_exists() {
         .arg(project.root.path())
         .args(["--label", "project-notes"])
         .assert()
+        .success();
+    assert_eq!(project.manifest()["resources"].as_array().unwrap().len(), 0);
+
+    let link = project
+        .ctx()
+        .args([
+            "link",
+            "project-notes",
+            "--reason",
+            "needed for tests",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
         .success()
         .get_output()
         .stdout
         .clone();
-    let add = String::from_utf8(add).unwrap();
-    assert!(add.contains("linked_to_current_project: true"));
+    let link = String::from_utf8(link).unwrap();
+    assert!(link.contains("command: link"));
 
     let manifest = project.manifest();
     assert_eq!(manifest["resources"][0]["label"], "project-notes");
+    assert_eq!(manifest["resources"][0]["reason"], "needed for tests");
 
     let query = project
         .ctx()
@@ -224,6 +239,26 @@ fn project_add_links_global_resource_when_manifest_exists() {
     let query = String::from_utf8(query).unwrap();
     assert!(query.contains("scope: project"));
     assert!(query.contains("CTX_PROJECT_LINKED_TOKEN"));
+
+    project
+        .ctx()
+        .args(["unlink", "project-notes", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    assert_eq!(project.manifest()["resources"].as_array().unwrap().len(), 0);
+
+    let global_query = project
+        .ctx()
+        .args(["query", "project linked token", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let global_query = String::from_utf8(global_query).unwrap();
+    assert!(!global_query.contains("Project linked docs"));
 }
 
 #[test]
@@ -249,6 +284,12 @@ fn notes_can_be_added_queried_and_debugged() {
         .args(["--cwd"])
         .arg(project.root.path())
         .args(["--label", "retry-notes"])
+        .assert()
+        .success();
+    project
+        .ctx()
+        .args(["link", "retry-notes", "--cwd"])
+        .arg(project.root.path())
         .assert()
         .success();
 
@@ -307,6 +348,12 @@ fn docs_crawl_recursively_indexes_linked_pages() {
         .args(["--label", "fixture-docs"])
         .assert()
         .success();
+    project
+        .ctx()
+        .args(["link", "fixture-docs", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
 
     let output = project
         .ctx()
@@ -358,6 +405,12 @@ fn update_keeps_pointer_on_noop_and_moves_on_content_change() {
         .args(["--label", "fixture-docs"])
         .assert()
         .success();
+    project
+        .ctx()
+        .args(["link", "fixture-docs", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
     let first = project.resource_current("fixture-docs");
 
     project
@@ -401,6 +454,12 @@ fn use_rejects_missing_snapshot() {
         .args(["--label", "notes"])
         .assert()
         .success();
+    project
+        .ctx()
+        .args(["link", "notes", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
 
     project
         .ctx()
@@ -411,7 +470,7 @@ fn use_rejects_missing_snapshot() {
 }
 
 #[test]
-fn remove_prune_cache_deletes_unused_snapshot() {
+fn unlink_removes_project_link_without_deleting_cache() {
     let project = TestProject::new();
     let note_path = project.root.path().join("notes.md");
     fs::write(&note_path, "A note about deleting cache entries.").unwrap();
@@ -430,8 +489,28 @@ fn remove_prune_cache_deletes_unused_snapshot() {
         .args(["--label", "notes"])
         .assert()
         .success();
+    project
+        .ctx()
+        .args(["link", "notes", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
     let cache_path = project.resource_path("notes");
     assert!(std::path::Path::new(&cache_path).exists());
+
+    project
+        .ctx()
+        .args(["unlink", "notes", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    assert!(std::path::Path::new(&cache_path).exists());
+    assert!(
+        project.manifest()["resources"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 
     project
         .ctx()
@@ -440,12 +519,6 @@ fn remove_prune_cache_deletes_unused_snapshot() {
         .assert()
         .success();
     assert!(!std::path::Path::new(&cache_path).exists());
-    assert!(
-        project.manifest()["resources"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
 }
 
 #[test]
@@ -487,6 +560,12 @@ fn embeddings_enable_vector_results_when_lexical_search_misses() {
         .args(["--label", "rust-notes"])
         .assert()
         .success();
+    project
+        .ctx_with_embeddings()
+        .args(["link", "rust-notes", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
 
     let output = project
         .ctx_with_embeddings()
@@ -520,6 +599,12 @@ fn live_github_source_can_be_cached_and_resolved_by_path() {
         .args(["--cwd"])
         .arg(project.root.path())
         .args(["--label", "hello-world"])
+        .assert()
+        .success();
+    project
+        .ctx()
+        .args(["link", "hello-world", "--cwd"])
+        .arg(project.root.path())
         .assert()
         .success();
     let output = project

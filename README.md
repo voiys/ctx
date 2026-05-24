@@ -8,7 +8,7 @@ The guiding split is deliberate:
 
 - Source repositories are pinned and cached on disk. Agents explore them with normal code tools such as `rg`, file reads, and callpath tracing.
 - Documentation and notes are snapshotted, indexed, and searched as LLM-ready context blocks.
-- Project state is optional. Without `.ctx/ctx.json`, commands use the global cache. With `.ctx/ctx.json`, queries default to that project's linked resources.
+- Project state is optional. Without `.ctx/ctx.json`, commands use the global cache. With `.ctx/ctx.json`, queries default to that project's explicitly linked resources. Use `ctx link` and `ctx unlink` to edit the project view; `ctx add` always stores global references only.
 
 ## V1 Shape
 
@@ -16,6 +16,7 @@ The guiding split is deliberate:
 ctx init
 ctx add https://github.com/owner/repo
 ctx add https://docs.example.com
+ctx link <label>
 ctx query "how do retries work?"
 ctx query "how do retries work?" --debug
 ctx list
@@ -23,6 +24,7 @@ ctx show
 ctx path <label>
 ctx update <label>
 ctx sync
+ctx unlink <label>
 ctx remove <label>
 ctx doctor
 ctx install

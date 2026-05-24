@@ -408,10 +408,6 @@ pub(crate) fn snapshot_path_for_pointer(
     Ok(path)
 }
 
-pub(crate) fn prune_resource_cache(db_path: &Path, resource: &Resource) -> Result<bool> {
-    remove_global_resource(db_path, resource, true)
-}
-
 pub(crate) fn remove_global_resource(
     db_path: &Path,
     resource: &Resource,

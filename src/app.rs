@@ -28,9 +28,8 @@ use crate::snapshot::{snapshot_docs, snapshot_notes};
 use crate::source::{cache_github_source, validate_source_pointer};
 use crate::storage::{
     allowed_global_resource_ids, current_content_hash, ensure_db, find_global_resource,
-    index_snapshot, list_global_resource_models, list_global_resources, prune_resource_cache,
-    remove_global_resource, snapshot_path_for_pointer, snapshots_for_resources,
-    upsert_global_resource,
+    index_snapshot, list_global_resource_models, list_global_resources, remove_global_resource,
+    snapshot_path_for_pointer, snapshots_for_resources, upsert_global_resource,
 };
 use crate::util::{default_label_for_url, stable_id, timestamp};
 
@@ -52,7 +51,7 @@ enum Commands {
         #[arg(long)]
         no_agents: bool,
     },
-    /// Add a source, docs, or notes URL to this project.
+    /// Add a source, docs, or notes URL to the global cache.
     Add {
         url: String,
         #[arg(long)]
@@ -126,6 +125,20 @@ enum Commands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
+    /// Link a global resource into this project.
+    Link {
+        target: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Unlink a resource from this project manifest.
+    Unlink {
+        target: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
     /// Move the current manifest pointer for a resource.
     Use {
         label: String,
@@ -133,7 +146,7 @@ enum Commands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
-    /// Remove a resource from the project manifest.
+    /// Remove a global resource.
     Remove {
         target: String,
         #[arg(long)]
@@ -192,6 +205,12 @@ pub fn run() -> Result<()> {
         } => show(cwd, target, snapshots),
         Commands::List { project, kind, cwd } => list(cwd, project, kind),
         Commands::Path { target, cwd } => print_source_path(cwd, &target),
+        Commands::Link {
+            target,
+            reason,
+            cwd,
+        } => link(cwd, &target, reason),
+        Commands::Unlink { target, cwd } => unlink(cwd, &target),
         Commands::Use {
             label,
             pointer,
@@ -250,7 +269,6 @@ fn add(
     let app = AppContext::load(cwd)?;
     let paths = &app.paths;
     app.ensure_global_storage()?;
-    let mut manifest = read_optional_manifest(paths)?;
     let resolved = resolve_input(input_url)?;
     let now = timestamp();
 
@@ -333,21 +351,12 @@ fn add(
         }
     };
 
-    let linked_to_project = if let Some(manifest) = &mut manifest {
-        upsert_manifest_resource(manifest, resource.clone());
-        write_manifest(&paths.manifest_path, manifest)?;
-        true
-    } else {
-        false
-    };
-
     print_toon(CommandStatus {
         command: "add",
         status: "ok",
         result: json!({
             "resource": resource,
             "extra": extra,
-            "linked_to_current_project": linked_to_project,
         }),
     })
 }
@@ -663,6 +672,47 @@ fn print_source_path(cwd: Option<PathBuf>, target: &str) -> Result<()> {
     Ok(())
 }
 
+fn link(cwd: Option<PathBuf>, target: &str, reason: Option<String>) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    let paths = &app.paths;
+    app.ensure_project()?;
+    let mut manifest = read_manifest(&paths.manifest_path)?;
+    let mut resource = find_global_resource(&paths.db_path, target)?;
+    if reason.is_some() {
+        resource.reason = reason;
+    }
+    upsert_manifest_resource(&mut manifest, resource.clone());
+    write_manifest(&paths.manifest_path, &manifest)?;
+    print_toon(CommandStatus {
+        command: "link",
+        status: "ok",
+        result: json!({
+            "resource": resource,
+            "manifest_path": paths.manifest_path,
+        }),
+    })
+}
+
+fn unlink(cwd: Option<PathBuf>, target: &str) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    let paths = &app.paths;
+    app.ensure_project()?;
+    let mut manifest = read_manifest(&paths.manifest_path)?;
+    let removed = find_manifest_resource(&manifest, target)?.clone();
+    manifest.resources.retain(|resource| {
+        resource.label != target && resource.url != target && resource.id != target
+    });
+    write_manifest(&paths.manifest_path, &manifest)?;
+    print_toon(CommandStatus {
+        command: "unlink",
+        status: "ok",
+        result: json!({
+            "resource": removed,
+            "manifest_path": paths.manifest_path,
+        }),
+    })
+}
+
 fn use_pointer(cwd: Option<PathBuf>, label: &str, pointer: &str) -> Result<()> {
     let app = AppContext::load(cwd)?;
     let paths = &app.paths;
@@ -694,39 +744,13 @@ fn remove(cwd: Option<PathBuf>, target: &str, prune_cache: bool) -> Result<()> {
     let app = AppContext::load(cwd)?;
     let paths = &app.paths;
     app.ensure_global_storage()?;
-    let mut manifest = read_optional_manifest(paths)?;
-    let mut unlinked_from_project = false;
-    let mut global_only_target = false;
-    let removed = if let Some(manifest) = &mut manifest {
-        if let Ok(resource) = find_manifest_resource(manifest, target).cloned() {
-            let before = manifest.resources.len();
-            manifest.resources.retain(|resource| {
-                resource.label != target && resource.url != target && resource.id != target
-            });
-            unlinked_from_project = manifest.resources.len() != before;
-            write_manifest(&paths.manifest_path, manifest)?;
-            resource
-        } else {
-            global_only_target = true;
-            find_global_resource(&paths.db_path, target)?
-        }
-    } else {
-        global_only_target = true;
-        find_global_resource(&paths.db_path, target)?
-    };
-    let pruned = if global_only_target {
-        remove_global_resource(&paths.db_path, &removed, prune_cache)?
-    } else if prune_cache {
-        prune_resource_cache(&paths.db_path, &removed)?
-    } else {
-        false
-    };
+    let removed = find_global_resource(&paths.db_path, target)?;
+    let pruned = remove_global_resource(&paths.db_path, &removed, prune_cache)?;
     print_toon(CommandStatus {
         command: "remove",
         status: "ok",
         result: json!({
             "target": target,
-            "unlinked_from_current_project": unlinked_from_project,
             "prune_cache_requested": prune_cache,
             "pruned_cache": pruned,
         }),

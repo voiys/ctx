@@ -105,22 +105,29 @@ Flags:
 
 ### `ctx add <absolute-url>`
 
-Add a resource globally and prepare it. If the current directory has `.ctx/ctx.json`, also link the resource into that project manifest.
+Add a resource globally and prepare it. This command does not edit `.ctx/ctx.json`.
 
 Behavior:
 
 - GitHub repo URL: resolve, pin, clone/cache globally
 - Docs URL: crawl, snapshot, index globally
 - Notes file URL: snapshot, index globally
-- Project manifest present: write or update manifest entry
-
 Flags:
 
 - `--label <name>`: stable resource name
-- `--reason <text>`: why this resource belongs to the project
+- `--reason <text>`: why this resource belongs in the global cache
 - `--no-index`: fetch/snapshot only
 - `--max-pages <n>`: maximum docs pages to crawl, default `256`
 - `--concurrency <n>`: docs crawl worker count, default `16`
+- `--cwd <path>`: project root override
+
+### `ctx link <label-or-url-or-id>`
+
+Link an existing global resource into the current project manifest.
+
+Flags:
+
+- `--reason <text>`: project-specific reason for linking this resource
 - `--cwd <path>`: project root override
 
 ### `ctx update <label-or-url>`
@@ -201,13 +208,21 @@ Flags:
 
 - `--cwd <path>`: project root override
 
-### `ctx remove <label-or-url>`
+### `ctx unlink <label-or-url-or-id>`
 
-Remove a resource. With a project manifest, this unlinks the resource from the project; `--prune-cache` also deletes the global cache entry. Without a project manifest, this removes the global resource entry; `--prune-cache` also deletes cached files.
+Remove a resource from the current project manifest without deleting the global resource or cached files.
 
 Flags:
 
-- `--prune-cache`: also delete cached data if unused
+- `--cwd <path>`: project root override
+
+### `ctx remove <label-or-url>`
+
+Remove a global resource entry. This does not edit any project manifest. Use `ctx unlink` for project manifests.
+
+Flags:
+
+- `--prune-cache`: also delete cached files
 - `--cwd <path>`: project root override
 
 ### `ctx doctor`

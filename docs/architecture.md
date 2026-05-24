@@ -8,7 +8,7 @@
 - Global cache: `~/.ctx`
 - SQLite index: `~/.ctx/ctx.db`
 
-The global cache is the source of stored references. A project manifest is an optional linked view that records project intent and current pointers. The index is rebuildable local state.
+The global cache is the source of stored references. A project manifest is an optional linked view that records project intent and current pointers. `ctx add` mutates global state; `ctx link` and `ctx unlink` mutate project state. The index is rebuildable local state.
 
 ## Module Shape
 
