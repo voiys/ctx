@@ -2157,4 +2157,65 @@ mod tests {
     fn rejects_bare_paths() {
         assert!(resolve_input("/tmp/notes.md").is_err());
     }
+
+    #[test]
+    fn resolver_accepts_only_absolute_urls() {
+        for input in ["owner/repo", "npm:zod", "docs/index.html", "../notes.md"] {
+            assert!(resolve_input(input).is_err(), "{input} should be rejected");
+        }
+        assert!(matches!(
+            resolve_input("https://example.com/docs").unwrap(),
+            ResolvedInput::Docs { .. }
+        ));
+    }
+
+    #[test]
+    fn queryable_resources_never_include_sources() {
+        let manifest = Manifest {
+            version: 1,
+            defaults: Defaults::default(),
+            resources: vec![
+                test_resource("source-id", "source", ResourceKind::Source),
+                test_resource("docs-id", "docs", ResourceKind::Docs),
+                test_resource("notes-id", "notes", ResourceKind::Notes),
+            ],
+        };
+
+        let all = allowed_resource_ids(&manifest, None, None).unwrap();
+        assert_eq!(all, BTreeSet::from(["docs-id".into(), "notes-id".into()]));
+
+        let source_label = allowed_resource_ids(&manifest, Some("source"), None);
+        assert!(source_label.is_err());
+
+        let docs = allowed_resource_ids(&manifest, None, Some(ResourceKind::Docs)).unwrap();
+        assert_eq!(docs, BTreeSet::from(["docs-id".into()]));
+    }
+
+    #[test]
+    fn crawl_filter_stays_under_seed_path_and_skips_assets() {
+        let seed = Url::parse("https://example.com/docs/guide/").unwrap();
+        let child = Url::parse("https://example.com/docs/guide/install").unwrap();
+        let sibling = Url::parse("https://example.com/docs/api").unwrap();
+        let other_host = Url::parse("https://other.example.com/docs/guide/install").unwrap();
+        let asset = Url::parse("https://example.com/docs/guide/logo.svg").unwrap();
+
+        assert!(is_crawlable_doc_url(&seed, &child));
+        assert!(!is_crawlable_doc_url(&seed, &sibling));
+        assert!(!is_crawlable_doc_url(&seed, &other_host));
+        assert!(!is_crawlable_doc_url(&seed, &asset));
+    }
+
+    fn test_resource(id: &str, label: &str, kind: ResourceKind) -> Resource {
+        Resource {
+            id: id.to_string(),
+            label: label.to_string(),
+            kind,
+            url: format!("https://example.com/{label}"),
+            reason: None,
+            current: "current".to_string(),
+            local_path: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
 }

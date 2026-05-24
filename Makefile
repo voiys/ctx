@@ -1,4 +1,4 @@
-.PHONY: build install-local test check
+.PHONY: audit build check install-local lint nextest test unused-deps
 
 build:
 	cargo build --release
@@ -9,7 +9,17 @@ install-local: build
 test:
 	cargo test
 
-check:
+nextest:
+	cargo nextest run
+
+lint:
 	cargo fmt --check
-	cargo test
-	cargo clippy -- -D warnings
+	cargo clippy --all-targets --all-features -- -D warnings
+
+audit:
+	cargo deny check
+
+unused-deps:
+	cargo machete
+
+check: lint test audit unused-deps
