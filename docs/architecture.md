@@ -10,6 +10,37 @@
 
 The manifest is the source of project intent. The cache and index are rebuildable local state.
 
+## Module Shape
+
+`ctx` uses small Rust modules instead of a framework-level dependency injection system.
+
+```text
+main.rs       process entrypoint
+app.rs        CLI command orchestration
+context.rs    AppContext, runtime paths, project readiness
+models.rs     shared durable and output types
+manifest.rs   .ctx/ctx.json reads, writes, selection helpers
+input.rs      absolute URL classification
+source.rs     GitHub source clone/pin/path behavior
+crawl.rs      recursive bounded docs crawl
+snapshot.rs   immutable docs/notes snapshot writing
+storage.rs    SQLite schema, global resources, indexing, cache metadata
+retrieve.rs   lexical/vector retrieval, RRF, context packing
+embeddings.rs swappable embedding backend boundary
+agents.rs     AGENTS.md block management
+install.rs    local binary install command
+output.rs     TOON stdout encoding
+util.rs       small shared helpers
+```
+
+The intended layering is:
+
+```text
+CLI -> AppContext -> manifest/cache/index services -> concrete implementations
+```
+
+Only boundaries that are expected to change get a trait-like seam. Embeddings use `EmbeddingBackend` because local engines, external APIs, and disabled/BM25-only mode should be swappable without touching storage or retrieval command code.
+
 ## Source vs Retrieval
 
 Source repositories are not RAG chunks in V1. They are pinned code trees.
@@ -50,7 +81,7 @@ Target retrieval flow:
 7. Pack top results into the default budget
 8. Emit structured stdout
 
-Embeddings are generated during indexing with `fastembed` and stored directly on chunks in SQLite. Query-time vector scoring runs over embedded chunks, then lexical and vector candidates are fused with reciprocal rank fusion.
+Embeddings are generated during indexing through `EmbeddingBackend` and stored directly on chunks in SQLite. The default backend is `fastembed`; `CTX_EMBEDDINGS=off` selects the disabled backend. Query-time vector scoring runs over embedded chunks, then lexical and vector candidates are fused with reciprocal rank fusion.
 
 ## Local Install
 
