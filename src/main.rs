@@ -1767,7 +1767,9 @@ fn list_global_resources(
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT r.id, r.label, r.kind, r.url, r.current, r.local_path, r.updated_at,
-                COUNT(s.snapshot_id) AS snapshot_count
+                COUNT(s.snapshot_id) AS snapshot_count,
+                MAX(CASE WHEN s.snapshot_id = r.current THEN s.page_count END) AS current_page_count,
+                MAX(CASE WHEN s.snapshot_id = r.current THEN s.content_hash END) AS current_content_hash
          FROM resources r
          LEFT JOIN snapshots s ON s.resource_id = r.id
          GROUP BY r.id
@@ -1783,6 +1785,8 @@ fn list_global_resources(
             "local_path": row.get::<_, Option<String>>(5)?,
             "updated_at": row.get::<_, String>(6)?,
             "snapshot_count": row.get::<_, i64>(7)?,
+            "current_page_count": row.get::<_, Option<i64>>(8)?,
+            "current_content_hash": row.get::<_, Option<String>>(9)?,
         }))
     })?;
     let mut out = Vec::new();
@@ -1793,9 +1797,32 @@ fn list_global_resources(
         {
             continue;
         }
+        let mut row = row;
+        if let Some(object) = row.as_object_mut() {
+            let size = object
+                .get("local_path")
+                .and_then(|value| value.as_str())
+                .map(Path::new)
+                .and_then(|path| path_size_bytes(path).ok());
+            object.insert("size_bytes".to_string(), json!(size));
+        }
         out.push(row);
     }
     Ok(out)
+}
+
+fn path_size_bytes(path: &Path) -> Result<u64> {
+    if path.is_file() {
+        return Ok(fs::metadata(path)?.len());
+    }
+    if !path.is_dir() {
+        return Ok(0);
+    }
+    let mut total = 0u64;
+    for entry in fs::read_dir(path)? {
+        total += path_size_bytes(&entry?.path())?;
+    }
+    Ok(total)
 }
 
 fn snapshots_for_resources(
