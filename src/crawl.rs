@@ -22,6 +22,7 @@ pub(crate) fn crawl_docs(
     let client = reqwest::blocking::Client::builder()
         .user_agent("ctx/0.1 (+https://github.com/voiys/ctx; local docs indexer)")
         .timeout(std::time::Duration::from_secs(20))
+        .connect_timeout(std::time::Duration::from_secs(10))
         .build()?;
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(concurrency)
@@ -29,6 +30,7 @@ pub(crate) fn crawl_docs(
     let mut seen = HashSet::new();
     let mut frontier = Vec::new();
     let mut pages = Vec::new();
+    let mut found_llms = false;
 
     for llms_url in llms_candidate_urls(&seed_url) {
         let canonical = canonical_url(&llms_url);
@@ -50,12 +52,14 @@ pub(crate) fn crawl_docs(
             url: fetched_page.url,
             content: fetched_page.text,
         });
+        found_llms = true;
         if pages.len() >= max_pages {
             return Ok(pages);
         }
+        break;
     }
 
-    if seen.insert(canonical_url(&seed_url)) {
+    if !found_llms && seen.insert(canonical_url(&seed_url)) {
         frontier.push(seed_url.clone());
     }
 
@@ -243,6 +247,9 @@ fn is_crawlable_llms_url(llms_url: &Url, candidate: &Url) -> bool {
 }
 
 fn llms_candidate_urls(seed: &Url) -> Vec<Url> {
+    if seed.path().trim_end_matches('/').ends_with("/llms.txt") {
+        return vec![strip_fragment_and_query(seed.clone())];
+    }
     let mut candidates = Vec::new();
     if let Ok(url) = Url::parse(&format!("{}/llms.txt", seed.as_str().trim_end_matches('/'))) {
         candidates.push(url);
@@ -354,6 +361,17 @@ mod tests {
         assert!(candidates.contains(&"https://example.com/docs/overview/llms.txt".to_string()));
         assert!(candidates.contains(&"https://example.com/docs/llms.txt".to_string()));
         assert!(candidates.contains(&"https://example.com/llms.txt".to_string()));
+    }
+
+    #[test]
+    fn explicit_llms_seed_does_not_probe_extra_llms_variants() {
+        let seed = Url::parse("https://example.com/docs/llms.txt").unwrap();
+        let candidates = llms_candidate_urls(&seed)
+            .into_iter()
+            .map(|url| url.to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(candidates, vec!["https://example.com/docs/llms.txt"]);
     }
 
     #[test]

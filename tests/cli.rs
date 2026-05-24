@@ -438,7 +438,7 @@ fn docs_crawl_discovers_llms_txt_links() {
         .stdout
         .clone();
     let show = String::from_utf8(show).unwrap();
-    assert!(show.contains(",4,") || show.contains("page_count: 4"));
+    assert!(show.contains(",3,") || show.contains("page_count: 3"));
 }
 
 #[test]

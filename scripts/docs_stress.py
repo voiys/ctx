@@ -15,6 +15,7 @@ import json
 import os
 import pathlib
 import random
+import signal
 import shutil
 import sqlite3
 import statistics
@@ -123,7 +124,8 @@ def library_target(library_id: str, source: str, rank: int | None = None) -> dic
     clean = library_id.strip()
     return {
         "library_id": clean,
-        "url": f"{CONTEXT7}{clean}/llms.txt",
+        "url": f"{CONTEXT7}{clean}",
+        "llms_url": f"{CONTEXT7}{clean}/llms.txt",
         "label": "ctxstress-" + clean.strip("/").replace("/", "-").replace(".", "-").lower(),
         "source": source,
         "rank": rank,
@@ -290,7 +292,7 @@ def run_target(
     command = [
         str(args.ctx_bin),
         "add",
-        target["url"],
+        target["llms_url"] if args.url_mode == "llms" and "llms_url" in target else target["url"],
         "--label",
         target["label"],
         "--max-pages",
@@ -309,18 +311,20 @@ def run_target(
     timed_out = False
     with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
         try:
-            process = subprocess.run(
+            process = subprocess.Popen(
                 time_prefix(time_path) + command,
                 stdout=stdout,
                 stderr=stderr,
                 env=env,
-                timeout=args.timeout_s,
-                check=False,
+                start_new_session=True,
             )
+            process.wait(timeout=args.timeout_s)
             exit_code = process.returncode
         except subprocess.TimeoutExpired:
             timed_out = True
             exit_code = 124
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
     elapsed = time.perf_counter() - started
 
     stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
@@ -332,6 +336,7 @@ def run_target(
         "elapsed_s": round(elapsed, 3),
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
+        "url_mode": args.url_mode,
         "ctx_home_bytes": dir_size(ctx_home),
     }
     row.update(parse_time_metrics(time_path))
@@ -419,6 +424,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 "delay_ms": args.delay_ms,
                 "timeout_s": args.timeout_s,
                 "embeddings": args.embeddings,
+                "url_mode": args.url_mode,
             },
             indent=2,
             sort_keys=True,
@@ -468,6 +474,7 @@ def main() -> None:
     run.add_argument("--jitter-ms", type=int, default=250)
     run.add_argument("--timeout-s", type=int, default=180)
     run.add_argument("--embeddings", choices=["on", "off"], default="off")
+    run.add_argument("--url-mode", choices=["llms", "base"], default="llms")
     run.add_argument("--max-rss-mb", type=int, default=4096)
     run.add_argument("--max-home-mb", type=int, default=4096)
     run.set_defaults(func=cmd_run)
