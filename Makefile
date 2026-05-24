@@ -1,7 +1,10 @@
-.PHONY: audit build check install-local lint nextest test unused-deps
+.PHONY: audit bench-retrieval build check install-local lint nextest test unused-deps
 
 build:
 	cargo build --release
+
+bench-retrieval: build
+	python3 scripts/retrieval_bench.py --mode both --embeddings on
 
 install-local: build
 	./target/release/ctx install --force

@@ -52,6 +52,16 @@ make install-local
 
 That builds the release binary and copies it to `~/.local/bin/ctx`. Make sure `~/.local/bin` is on your `PATH`.
 
+## Development Checks
+
+```sh
+make check
+cargo nextest run
+make bench-retrieval
+```
+
+`make bench-retrieval` runs the small and large corpus retrieval benchmark described in `docs/retrieval-benchmark.md`.
+
 ## Status
 
 This repository is a fresh implementation with the v1 core in place: global resources, optional project manifests, GitHub source caching, recursive docs snapshots, notes snapshots, SQLite FTS indexing, local embeddings, RRF hybrid retrieval, global listing, cache pruning, pointer validation, and a local install command.
