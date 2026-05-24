@@ -22,7 +22,7 @@ python3 scripts/docs_stress.py run \
   --ctx-bin target/release/ctx \
   --max-pages 8 \
   --concurrency 2 \
-  --url-mode llms \
+  --url-mode base \
   --embeddings off
 ```
 
@@ -36,4 +36,4 @@ Each run writes:
 - `logs/*.stdout`, `logs/*.stderr`, `logs/*.time`: raw command diagnostics
 - `summary.md`: aggregate timing, status, RSS, disk, page, and chunk metrics
 
-Context7 target discovery starts from `https://context7.com/`, follows the homepage rankings link to `/api/rankings`, then fills the list with public `/api/v2/libs/search` results. Each target stores both the Context7 library page URL and the expected `llms.txt` URL. Use `--url-mode llms` for the main low-noise corpus and `--url-mode base` when specifically testing fallback behavior from a library page.
+Context7 target discovery starts from `https://context7.com/`, follows the homepage rankings link to `/api/rankings`, then fills the list with public `/api/v2/libs/search` results. Each target stores both the Context7 library page URL and the expected `llms.txt` URL. Use `--url-mode base` for the normal crawler path: `ctx` tries nearby `llms.txt` and then crawls the docs page. Use `--url-mode llms` only when isolating raw `llms.txt` ingestion.

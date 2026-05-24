@@ -30,8 +30,6 @@ pub(crate) fn crawl_docs(
     let mut seen = HashSet::new();
     let mut frontier = Vec::new();
     let mut pages = Vec::new();
-    let mut found_llms = false;
-
     for llms_url in llms_candidate_urls(&seed_url) {
         let canonical = canonical_url(&llms_url);
         if !seen.insert(canonical) {
@@ -52,14 +50,13 @@ pub(crate) fn crawl_docs(
             url: fetched_page.url,
             content: fetched_page.text,
         });
-        found_llms = true;
         if pages.len() >= max_pages {
             return Ok(pages);
         }
         break;
     }
 
-    if !found_llms && seen.insert(canonical_url(&seed_url)) {
+    if !is_llms_txt_url(&seed_url) && seen.insert(canonical_url(&seed_url)) {
         frontier.push(seed_url.clone());
     }
 
@@ -247,7 +244,7 @@ fn is_crawlable_llms_url(llms_url: &Url, candidate: &Url) -> bool {
 }
 
 fn llms_candidate_urls(seed: &Url) -> Vec<Url> {
-    if seed.path().trim_end_matches('/').ends_with("/llms.txt") {
+    if is_llms_txt_url(seed) {
         return vec![strip_fragment_and_query(seed.clone())];
     }
     let mut candidates = Vec::new();
@@ -263,6 +260,10 @@ fn llms_candidate_urls(seed: &Url) -> Vec<Url> {
     origin.set_fragment(None);
     candidates.push(origin);
     dedupe_urls(candidates)
+}
+
+fn is_llms_txt_url(url: &Url) -> bool {
+    url.path().trim_end_matches('/').ends_with("/llms.txt")
 }
 
 fn llms_parent_path(url: &Url) -> Option<String> {

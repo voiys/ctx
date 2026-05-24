@@ -383,6 +383,48 @@ fn docs_crawl_recursively_indexes_linked_pages() {
 }
 
 #[test]
+fn docs_crawl_falls_back_when_llms_txt_is_absent() {
+    let site = FixtureSite::new(HashMap::from([
+        (
+            "/docs".to_string(),
+            r#"<html><body><main>
+            <a href="/docs/guide">Guide</a>
+            Docs home mentions CTX_NO_LLMS_HOME_TOKEN.
+            </main></body></html>"#
+                .to_string(),
+        ),
+        (
+            "/docs/guide".to_string(),
+            "Guide page mentions CTX_NO_LLMS_GUIDE_TOKEN.".to_string(),
+        ),
+    ]));
+    let project = TestProject::new();
+
+    project
+        .ctx()
+        .arg("add")
+        .arg(format!("{}/docs", site.base_url))
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .args(["--label", "no-llms-docs"])
+        .assert()
+        .success();
+
+    let output = project
+        .ctx()
+        .args(["query", "CTX_NO_LLMS_GUIDE_TOKEN", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.contains("no-llms-docs"));
+    assert!(stdout.contains("CTX_NO_LLMS_GUIDE_TOKEN"));
+}
+
+#[test]
 fn docs_crawl_discovers_llms_txt_links() {
     let site = FixtureSite::new(HashMap::from([
         (
@@ -438,7 +480,7 @@ fn docs_crawl_discovers_llms_txt_links() {
         .stdout
         .clone();
     let show = String::from_utf8(show).unwrap();
-    assert!(show.contains(",3,") || show.contains("page_count: 3"));
+    assert!(show.contains(",4,") || show.contains("page_count: 4"));
 }
 
 #[test]

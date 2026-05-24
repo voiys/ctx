@@ -40,7 +40,7 @@ Local stress evidence from 2026-05-24. Raw outputs live under ignored `bench-res
 
 - mode: Context7 library page URL, embeddings off
 - status: 8 ok, 1 timeout, 1 ok after 73s
-- finding: base URL mode exercises fallback behavior, but it is too noisy for broad Context7 stress runs because transient `llms.txt` fetches can hang long enough to dominate the run.
+- finding: base URL mode is the correct product path because it exercises `llms.txt` plus ordinary docs crawling. This run exposed transient `llms.txt` hangs that the harness timeout and process-group cleanup now isolate.
 
 ### `20260524T101113Z`: embedding sample
 
@@ -51,11 +51,20 @@ Local stress evidence from 2026-05-24. Raw outputs live under ignored `bench-res
 - indexed: 5 pages, 82 chunks, 82 embeddings
 - finding: embedding memory is the resource ceiling. Healthy fetches index quickly after the model is cached, but local embedding runs should keep concurrency low and monitor RSS.
 
+### `20260524T102928Z`: corrected base-mode sanity run
+
+- mode: Context7 library page URL, embeddings off
+- status: 5 ok
+- p50 / p90 / max: 1.45s / 1.86s / 1.86s
+- max RSS: 21.0 MiB
+- indexed: 16 pages, 93 chunks
+- finding: corrected crawler behavior includes `llms.txt` plus ordinary docs-page crawling, with normal fallback still available when `llms.txt` is missing.
+
 ## Decisions
 
-- Use direct `llms.txt` mode for broad Context7 corpus stress.
-- Use base URL mode only as a targeted fallback test.
-- Treat the first successful `llms.txt` candidate as authoritative. Do not probe broader variants or fetch the seed page after that.
+- Use base URL mode for broad Context7 corpus stress so each target tests `llms.txt` plus docs crawling and normal fallback when `llms.txt` is missing.
+- Use direct `llms.txt` mode only as a targeted ingestion test.
+- Include the first successful `llms.txt` candidate, then crawl the seed docs page. Do not probe broader `llms.txt` variants after a successful candidate.
 - Keep per-target timeouts configurable. 15s caused false timeouts under normal network variance; 90s wastes time on missing or stalled resources.
 - Keep benchmark state isolated under per-run `CTX_HOME`.
 - Keep process-group cleanup in the harness so timed-out `/usr/bin/time` wrappers do not leave orphan `ctx` processes.

@@ -474,7 +474,7 @@ def main() -> None:
     run.add_argument("--jitter-ms", type=int, default=250)
     run.add_argument("--timeout-s", type=int, default=180)
     run.add_argument("--embeddings", choices=["on", "off"], default="off")
-    run.add_argument("--url-mode", choices=["llms", "base"], default="llms")
+    run.add_argument("--url-mode", choices=["base", "llms"], default="base")
     run.add_argument("--max-rss-mb", type=int, default=4096)
     run.add_argument("--max-home-mb", type=int, default=4096)
     run.set_defaults(func=cmd_run)
