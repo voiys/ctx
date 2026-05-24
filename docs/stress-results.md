@@ -60,6 +60,16 @@ Local stress evidence from 2026-05-24. Raw outputs live under ignored `bench-res
 - indexed: 16 pages, 93 chunks
 - finding: corrected crawler behavior includes `llms.txt` plus ordinary docs-page crawling, with normal fallback still available when `llms.txt` is missing.
 
+### `20260524T103921Z`: retrieval-prior crawler stress
+
+- mode: Context7 library page URL, embeddings off
+- status: 25 ok
+- p50 / p90 / max: 1.40s / 1.74s / 2.03s
+- max RSS: 22.2 MiB
+- cache size: 11.6 MiB
+- indexed: 78 pages, 468 chunks
+- finding: `llms.txt` plus docs-page crawling stayed fast and polite across the top 25 Context7 targets, with no bot/rate-limit signatures.
+
 ## Decisions
 
 - Use base URL mode for broad Context7 corpus stress so each target tests `llms.txt` plus docs crawling and normal fallback when `llms.txt` is missing.

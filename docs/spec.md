@@ -166,7 +166,7 @@ Flags:
 - `--kind docs|notes`: restrict by kind
 - `--cwd <path>`: project root override
 
-Retrieval uses code-aware lexical search plus semantic search, fused with reciprocal rank fusion. Set `CTX_EMBEDDINGS=off` only for tests or constrained environments.
+Retrieval uses code-aware lexical search plus semantic search, fused with reciprocal rank fusion. Chunks sourced from `llms.txt` get a small transparent retrieval prior after fusion so curated LLM context can break close ties without overriding stronger matches. Set `CTX_EMBEDDINGS=off` only for tests or constrained environments.
 
 ### `ctx show [label-or-url]`
 
@@ -270,6 +270,7 @@ Each result should include:
 - lexical rank and score
 - vector rank and score when available
 - fused rank and score
+- source prior and prior score when applied
 - matched tokens
 - chunk id
 - parent id

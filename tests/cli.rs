@@ -484,6 +484,45 @@ fn docs_crawl_discovers_llms_txt_links() {
 }
 
 #[test]
+fn query_debug_shows_llms_txt_source_prior() {
+    let site = FixtureSite::new(HashMap::from([
+        (
+            "/docs".to_string(),
+            "<html><body><main>Seed page mentions ordinary widgets.</main></body></html>"
+                .to_string(),
+        ),
+        (
+            "/docs/llms.txt".to_string(),
+            "Curated llms docs mention CTX_LLMS_PRIOR_TOKEN.".to_string(),
+        ),
+    ]));
+    let project = TestProject::new();
+
+    project
+        .ctx()
+        .arg("add")
+        .arg(format!("{}/docs", site.base_url))
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .args(["--label", "prior-docs"])
+        .assert()
+        .success();
+
+    let output = project
+        .ctx()
+        .args(["query", "CTX_LLMS_PRIOR_TOKEN", "--debug", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.contains("source_prior: llms_txt"));
+    assert!(stdout.contains("source_prior_score: 0.002"));
+}
+
+#[test]
 fn update_keeps_pointer_on_noop_and_moves_on_content_change() {
     let site = FixtureSite::new(HashMap::from([(
         "/".to_string(),

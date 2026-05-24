@@ -128,6 +128,8 @@ pub(crate) struct CandidateBase {
 pub(crate) struct CandidateScore {
     pub(crate) base: CandidateBase,
     pub(crate) final_score: f64,
+    pub(crate) source_prior: Option<String>,
+    pub(crate) source_prior_score: f64,
     pub(crate) lexical_rank: Option<usize>,
     pub(crate) lexical_score: Option<f64>,
     pub(crate) vector_rank: Option<usize>,

@@ -4,5 +4,6 @@ pub(crate) const DEFAULT_MAX_PAGES: usize = 256;
 pub(crate) const DEFAULT_CRAWL_CONCURRENCY: usize = 16;
 pub(crate) const EMBEDDING_BATCH_SIZE: usize = 64;
 pub(crate) const RRF_K: f64 = 60.0;
+pub(crate) const LLMS_TXT_SOURCE_PRIOR_SCORE: f64 = 0.002;
 pub(crate) const AGENTS_BLOCK_START: &str = "<!-- ctx:start -->";
 pub(crate) const AGENTS_BLOCK_END: &str = "<!-- ctx:end -->";

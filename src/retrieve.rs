@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use rusqlite::{Connection, params};
 use serde_json::json;
 
-use crate::constants::RRF_K;
+use crate::constants::{LLMS_TXT_SOURCE_PRIOR_SCORE, RRF_K};
 use crate::embeddings::{
     EmbeddingBackend, EmbeddingService, bytes_to_embedding, cosine_similarity,
 };
@@ -61,6 +61,8 @@ pub(crate) fn query_index(
                 "lexical_score": candidate.lexical_score,
                 "vector_rank": candidate.vector_rank,
                 "vector_score": candidate.vector_score,
+                "source_prior": candidate.source_prior,
+                "source_prior_score": candidate.source_prior_score,
                 "rrf_score": candidate.final_score,
             });
         }
@@ -181,6 +183,8 @@ fn fuse_candidates(
         let entry = by_chunk.entry(base.chunk_id).or_insert(CandidateScore {
             base,
             final_score: 0.0,
+            source_prior: None,
+            source_prior_score: 0.0,
             lexical_rank: None,
             lexical_score: None,
             vector_rank: None,
@@ -195,6 +199,8 @@ fn fuse_candidates(
         let entry = by_chunk.entry(base.chunk_id).or_insert(CandidateScore {
             base,
             final_score: 0.0,
+            source_prior: None,
+            source_prior_score: 0.0,
             lexical_rank: None,
             lexical_score: None,
             vector_rank: None,
@@ -204,13 +210,32 @@ fn fuse_candidates(
         entry.vector_rank = Some(rank);
         entry.vector_score = Some(score);
     }
-    let mut out = by_chunk.into_values().collect::<Vec<_>>();
+    let mut out = by_chunk
+        .into_values()
+        .map(|mut candidate| {
+            if is_llms_txt_source(&candidate.base.source_url) {
+                candidate.source_prior = Some("llms_txt".to_string());
+                candidate.source_prior_score = LLMS_TXT_SOURCE_PRIOR_SCORE;
+                candidate.final_score += LLMS_TXT_SOURCE_PRIOR_SCORE;
+            }
+            candidate
+        })
+        .collect::<Vec<_>>();
     out.sort_by(|a, b| {
         b.final_score
             .partial_cmp(&a.final_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     out
+}
+
+fn is_llms_txt_source(source_url: &str) -> bool {
+    source_url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(source_url)
+        .trim_end_matches('/')
+        .ends_with("/llms.txt")
 }
 
 fn tokenize(input: &str) -> Vec<String> {
@@ -254,5 +279,38 @@ mod tests {
                 "config.file"
             ]
         );
+    }
+
+    #[test]
+    fn llms_txt_prior_breaks_close_retrieval_ties() {
+        let ordinary = CandidateBase {
+            chunk_id: 1,
+            resource_id: "docs".to_string(),
+            snapshot_id: "snapshot".to_string(),
+            kind: "docs".to_string(),
+            label: "docs".to_string(),
+            source_url: "https://example.com/docs/page".to_string(),
+            chunk_index: 0,
+            content: "ordinary docs".to_string(),
+        };
+        let llms = CandidateBase {
+            chunk_id: 2,
+            resource_id: "docs".to_string(),
+            snapshot_id: "snapshot".to_string(),
+            kind: "docs".to_string(),
+            label: "docs".to_string(),
+            source_url: "https://example.com/docs/llms.txt".to_string(),
+            chunk_index: 1,
+            content: "llms docs".to_string(),
+        };
+
+        let fused = fuse_candidates(vec![(ordinary, 1.0), (llms, 0.9)], Vec::new());
+
+        assert_eq!(
+            fused[0].base.source_url,
+            "https://example.com/docs/llms.txt"
+        );
+        assert_eq!(fused[0].source_prior.as_deref(), Some("llms_txt"));
+        assert_eq!(fused[0].source_prior_score, LLMS_TXT_SOURCE_PRIOR_SCORE);
     }
 }

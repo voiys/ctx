@@ -81,7 +81,7 @@ Target retrieval flow:
 7. Pack top results into the default budget
 8. Emit structured stdout
 
-Embeddings are generated during indexing through `EmbeddingBackend` and stored directly on chunks in SQLite. The default backend is `fastembed`; `CTX_EMBEDDINGS=off` selects the disabled backend. Query-time vector scoring runs over embedded chunks, then lexical and vector candidates are fused with reciprocal rank fusion.
+Embeddings are generated during indexing through `EmbeddingBackend` and stored directly on chunks in SQLite. The default backend is `fastembed`; `CTX_EMBEDDINGS=off` selects the disabled backend. Query-time vector scoring runs over embedded chunks, then lexical and vector candidates are fused with reciprocal rank fusion. `llms.txt` chunks keep the same embeddings as normal docs chunks; the only special treatment is a small retrieval-time source prior after fusion.
 
 ## Local Install
 
