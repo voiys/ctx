@@ -28,6 +28,12 @@ impl TestProject {
         command
     }
 
+    fn ctx_with_embeddings(&self) -> Command {
+        let mut command = Command::cargo_bin("ctx").unwrap();
+        command.env("CTX_HOME", self.home.path());
+        command
+    }
+
     fn manifest(&self) -> Value {
         let raw = fs::read_to_string(self.root.path().join(".ctx/ctx.json")).unwrap();
         serde_json::from_str(&raw).unwrap()
@@ -338,6 +344,48 @@ fn install_copies_binary_to_requested_bin_dir() {
         .assert()
         .success();
     assert!(bin_dir.join("ctx").exists());
+}
+
+#[test]
+#[ignore = "downloads a local embedding model; run for full retrieval smoke coverage"]
+fn embeddings_enable_vector_results_when_lexical_search_misses() {
+    let project = TestProject::new();
+    let note_path = project.root.path().join("notes.md");
+    fs::write(
+        &note_path,
+        "The compiler enforces borrowing and lifetimes so references stay valid.",
+    )
+    .unwrap();
+
+    project
+        .ctx_with_embeddings()
+        .args(["init", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    project
+        .ctx_with_embeddings()
+        .arg("add")
+        .arg(format!("file://{}", note_path.display()))
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .args(["--label", "rust-notes"])
+        .assert()
+        .success();
+
+    let output = project
+        .ctx_with_embeddings()
+        .args(["query", "memory ownership rules", "--debug", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.contains("borrowing and lifetimes"));
+    assert!(stdout.contains("rrf_hybrid"));
+    assert!(stdout.contains("vector_rank"));
 }
 
 #[test]
