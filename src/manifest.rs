@@ -84,7 +84,7 @@ pub(crate) fn allowed_resource_ids(
         out.insert(resource.id.clone());
     }
     if label.is_some() && out.is_empty() {
-        bail!("no queryable docs/notes resource matched label");
+        bail!("no queryable resource matched label");
     }
     Ok(out)
 }
@@ -103,17 +103,24 @@ mod tests {
                 test_resource("source-id", "source", ResourceKind::Source),
                 test_resource("docs-id", "docs", ResourceKind::Docs),
                 test_resource("notes-id", "notes", ResourceKind::Notes),
+                test_resource("arxiv-id", "arxiv", ResourceKind::Arxiv),
             ],
         };
 
         let all = allowed_resource_ids(&manifest, None, None).unwrap();
-        assert_eq!(all, BTreeSet::from(["docs-id".into(), "notes-id".into()]));
+        assert_eq!(
+            all,
+            BTreeSet::from(["arxiv-id".into(), "docs-id".into(), "notes-id".into()])
+        );
 
         let source_label = allowed_resource_ids(&manifest, Some("source"), None);
         assert!(source_label.is_err());
 
         let docs = allowed_resource_ids(&manifest, None, Some(ResourceKind::Docs)).unwrap();
         assert_eq!(docs, BTreeSet::from(["docs-id".into()]));
+
+        let arxiv = allowed_resource_ids(&manifest, None, Some(ResourceKind::Arxiv)).unwrap();
+        assert_eq!(arxiv, BTreeSet::from(["arxiv-id".into()]));
     }
 
     fn test_resource(id: &str, label: &str, kind: ResourceKind) -> Resource {

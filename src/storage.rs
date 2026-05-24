@@ -259,7 +259,7 @@ pub(crate) fn allowed_global_resource_ids(
         out.insert(id);
     }
     if label.is_some() && out.is_empty() {
-        bail!("no queryable docs/notes resource matched label");
+        bail!("no queryable resource matched label");
     }
     Ok(out)
 }
@@ -466,6 +466,7 @@ fn parse_kind(value: &str) -> Option<ResourceKind> {
         "source" => Some(ResourceKind::Source),
         "docs" => Some(ResourceKind::Docs),
         "notes" => Some(ResourceKind::Notes),
+        "arxiv" => Some(ResourceKind::Arxiv),
         _ => None,
     }
 }

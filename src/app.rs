@@ -8,6 +8,7 @@ use serde_json::json;
 use url::Url;
 
 use crate::agents::upsert_agents_block;
+use crate::arxiv::snapshot_arxiv;
 use crate::constants::{
     DEFAULT_BUDGET_TOKENS, DEFAULT_CRAWL_CONCURRENCY, DEFAULT_MAX_PAGES, DEFAULT_TOP_K,
 };
@@ -67,7 +68,7 @@ enum Commands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
-    /// Refresh a docs/notes snapshot or report a source pin.
+    /// Refresh a queryable snapshot or report a source pin.
     Update {
         target: String,
         #[arg(long)]
@@ -86,7 +87,7 @@ enum Commands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
-    /// Query project docs and notes.
+    /// Query project docs, arXiv papers, and notes.
     Query {
         question: String,
         #[arg(long, default_value_t = DEFAULT_TOP_K)]
@@ -349,6 +350,30 @@ fn add(
             }
             (resource, json!({"snapshot": snapshot}))
         }
+        ResolvedInput::ArxivPaper {
+            id: arxiv_id,
+            abs_url,
+        } => {
+            let label = label.unwrap_or_else(|| format!("arxiv-{arxiv_id}").replace('/', "-"));
+            let id = stable_id(&format!("arxiv:{abs_url}:{label}"));
+            let snapshot = snapshot_arxiv(&paths.home, &id, &arxiv_id, &abs_url)?;
+            let resource = Resource {
+                id,
+                label,
+                kind: ResourceKind::Arxiv,
+                url: abs_url,
+                reason,
+                current: snapshot.snapshot_id.clone(),
+                local_path: Some(snapshot.path.clone()),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            };
+            upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
+            if should_index {
+                index_snapshot(&paths.db_path, &resource, &snapshot)?;
+            }
+            (resource, json!({"snapshot": snapshot}))
+        }
     };
 
     print_toon(CommandStatus {
@@ -456,6 +481,37 @@ fn update(
                 }),
             })?;
         }
+        ResourceKind::Arxiv => {
+            let arxiv_id = resource
+                .url
+                .trim_start_matches("https://arxiv.org/abs/")
+                .to_string();
+            let snapshot = snapshot_arxiv(&paths.home, &resource.id, &arxiv_id, &resource.url)?;
+            let changed = current_content_hash(&paths.db_path, &resource.id, &resource.current)?
+                .is_none_or(|hash| hash != snapshot.content_hash);
+            if changed || force {
+                resource.current = snapshot.snapshot_id.clone();
+                resource.local_path = Some(snapshot.path.clone());
+                resource.updated_at = timestamp();
+                if let (Some(manifest), Some(index)) = (&mut manifest, linked_index) {
+                    manifest.resources[index] = resource.clone();
+                    write_manifest(&paths.manifest_path, manifest)?;
+                }
+                upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
+                index_snapshot(&paths.db_path, &resource, &snapshot)?;
+            } else {
+                let _ = fs::remove_dir_all(&snapshot.path);
+            }
+            print_toon(CommandStatus {
+                command: "update",
+                status: "ok",
+                result: json!({
+                    "changed": changed,
+                    "resource": resource,
+                    "snapshot": snapshot,
+                }),
+            })?;
+        }
     }
     Ok(())
 }
@@ -475,7 +531,7 @@ fn sync(cwd: Option<PathBuf>, reindex: bool) -> Result<()> {
                 .as_deref()
                 .map(Path::new)
                 .is_some_and(Path::exists),
-            ResourceKind::Docs | ResourceKind::Notes => {
+            ResourceKind::Docs | ResourceKind::Notes | ResourceKind::Arxiv => {
                 let path_ready = resource
                     .local_path
                     .as_deref()
@@ -721,7 +777,7 @@ fn use_pointer(cwd: Option<PathBuf>, label: &str, pointer: &str) -> Result<()> {
     let index = find_manifest_resource_index(&manifest, label)?;
     match manifest.resources[index].kind {
         ResourceKind::Source => validate_source_pointer(&manifest.resources[index], pointer)?,
-        ResourceKind::Docs | ResourceKind::Notes => {
+        ResourceKind::Docs | ResourceKind::Notes | ResourceKind::Arxiv => {
             let snapshot_path =
                 snapshot_path_for_pointer(&paths.db_path, &manifest.resources[index].id, pointer)?
                     .ok_or_else(|| anyhow!("snapshot not found for {}: {pointer}", label))?;

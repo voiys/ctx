@@ -23,7 +23,8 @@ manifest.rs   .ctx/ctx.json reads, writes, selection helpers
 input.rs      absolute URL classification
 source.rs     GitHub source clone/pin/path behavior
 crawl.rs      recursive bounded docs crawl
-snapshot.rs   immutable docs/notes snapshot writing
+arxiv.rs      arXiv paper metadata and optional HTML full-text capture
+snapshot.rs   immutable docs/arXiv/notes snapshot writing
 storage.rs    SQLite schema, global resources, indexing, cache metadata
 retrieve.rs   lexical/vector retrieval, RRF, context packing
 embeddings.rs swappable embedding backend boundary
@@ -52,13 +53,13 @@ ctx path <label>
 rg "symbol" "$(ctx path <label>)"
 ```
 
-Docs and notes are the searchable retrieval corpus.
+Docs, arXiv papers, and notes are the searchable retrieval corpus.
 
 This keeps code exploration structural and lets `ctx query` focus on high-recall prose/context retrieval.
 
-## Docs Snapshots
+## Retrieval Snapshots
 
-Docs are mutable on the internet, so `ctx` treats each crawl as an immutable local snapshot.
+Docs and arXiv pages are mutable on the internet, so `ctx` treats each crawl or paper capture as an immutable local snapshot. Notes are snapshotted the same way for consistent citations and rollbacks.
 
 ```text
 snapshot id = fetched timestamp + content fingerprint
@@ -66,14 +67,14 @@ snapshot id = fetched timestamp + content fingerprint
 
 `ctx update <label>` creates a new snapshot when content changes and moves the manifest's `current` pointer.
 
-Queries should never silently update a docs snapshot.
+Queries should never silently update a retrieval snapshot.
 
 ## Retrieval
 
 Target retrieval flow:
 
 1. Load `.ctx/ctx.json` when present
-2. Select project docs/notes resources, or global docs/notes resources when no project exists
+2. Select project docs/arXiv/notes resources, or global docs/arXiv/notes resources when no project exists
 3. Generate lexical candidates using code-aware tokens
 4. Generate vector candidates when embeddings exist
 5. Fuse candidates with reciprocal rank fusion

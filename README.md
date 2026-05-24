@@ -7,7 +7,7 @@ It pins source repositories, documentation snapshots, and notes globally, then l
 The guiding split is deliberate:
 
 - Source repositories are pinned and cached on disk. Agents explore them with normal code tools such as `rg`, file reads, and callpath tracing.
-- Documentation and notes are snapshotted, indexed, and searched as LLM-ready context blocks.
+- Documentation, notes, and arXiv papers are snapshotted, indexed, and searched as LLM-ready context blocks.
 - Project state is optional. Without `.ctx/ctx.json`, commands use the global cache. With `.ctx/ctx.json`, queries default to that project's explicitly linked resources. Use `ctx link` and `ctx unlink` to edit the project view; `ctx add` always stores global references only.
 
 ## V1 Shape
@@ -16,6 +16,7 @@ The guiding split is deliberate:
 ctx init
 ctx add https://github.com/owner/repo
 ctx add https://docs.example.com
+ctx add https://arxiv.org/abs/1706.03762
 ctx link <label>
 ctx query "how do retries work?"
 ctx query "how do retries work?" --debug
@@ -37,10 +38,11 @@ All command output is optimized for agent consumption. Human progress and diagno
 `ctx add` accepts absolute URLs only.
 
 - `https://github.com/owner/repo` is a source repository.
+- `https://arxiv.org/abs/<id>` is an arXiv paper.
 - Any other `http` or `https` URL is documentation.
 - `file:///absolute/path` may be used for notes.
 
-Source repositories are pinned to a concrete ref and cached globally. Documentation and notes are captured as immutable snapshots with timestamps and content hashes.
+Source repositories are pinned to a concrete ref and cached globally. Documentation, arXiv papers, and notes are captured as immutable snapshots with timestamps and content hashes.
 
 ## Install Locally
 
@@ -64,4 +66,4 @@ make bench-retrieval
 
 ## Status
 
-This repository is a fresh implementation with the v1 core in place: global resources, optional project manifests, GitHub source caching, recursive docs snapshots, notes snapshots, SQLite FTS indexing, local embeddings, RRF hybrid retrieval, global listing, cache pruning, pointer validation, and a local install command.
+This repository is a fresh implementation with the v1 core in place: global resources, optional project manifests, GitHub source caching, recursive docs snapshots, arXiv paper snapshots, notes snapshots, SQLite FTS indexing, local embeddings, RRF hybrid retrieval, global listing, cache pruning, pointer validation, and a local install command.

@@ -39,6 +39,7 @@ pub(crate) fn kind_str(kind: ResourceKind) -> &'static str {
         ResourceKind::Source => "source",
         ResourceKind::Docs => "docs",
         ResourceKind::Notes => "notes",
+        ResourceKind::Arxiv => "arxiv",
     }
 }
 

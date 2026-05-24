@@ -11,12 +11,14 @@ pub(crate) enum ResourceKind {
     Source,
     Docs,
     Notes,
+    Arxiv,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum QueryKind {
     Docs,
     Notes,
+    Arxiv,
 }
 
 impl From<QueryKind> for ResourceKind {
@@ -24,6 +26,7 @@ impl From<QueryKind> for ResourceKind {
         match value {
             QueryKind::Docs => ResourceKind::Docs,
             QueryKind::Notes => ResourceKind::Notes,
+            QueryKind::Arxiv => ResourceKind::Arxiv,
         }
     }
 }
@@ -93,6 +96,10 @@ pub(crate) enum ResolvedInput {
     Notes {
         url: String,
         path: PathBuf,
+    },
+    ArxivPaper {
+        id: String,
+        abs_url: String,
     },
 }
 

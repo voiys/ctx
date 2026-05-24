@@ -28,6 +28,12 @@ pub(crate) fn resolve_input(input: &str) -> Result<ResolvedInput> {
                     requested_ref,
                     clone_url: format!("https://github.com/{}/{}.git", segments[0], segments[1]),
                 })
+            } else if matches!(url.host_str(), Some("arxiv.org" | "www.arxiv.org")) {
+                let id = arxiv_id_from_url(&url)?;
+                Ok(ResolvedInput::ArxivPaper {
+                    abs_url: format!("https://arxiv.org/abs/{id}"),
+                    id,
+                })
             } else {
                 Ok(ResolvedInput::Docs {
                     url: url.to_string(),
@@ -45,6 +51,31 @@ pub(crate) fn resolve_input(input: &str) -> Result<ResolvedInput> {
         }
         scheme => bail!("unsupported URL scheme: {scheme}"),
     }
+}
+
+fn arxiv_id_from_url(url: &Url) -> Result<String> {
+    let segments = url
+        .path_segments()
+        .map(|segments| segments.collect::<Vec<_>>())
+        .unwrap_or_default();
+    let Some((first, rest)) = segments.split_first() else {
+        bail!("arXiv URL must include /abs/<id>, /pdf/<id>, or /html/<id>");
+    };
+    if !matches!(*first, "abs" | "pdf" | "html") || rest.is_empty() {
+        bail!("arXiv URL must include /abs/<id>, /pdf/<id>, or /html/<id>");
+    }
+    let mut id = rest.join("/");
+    if *first == "pdf" {
+        id = id.trim_end_matches(".pdf").to_string();
+    }
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '/' | '_'))
+    {
+        bail!("invalid arXiv identifier in URL");
+    }
+    Ok(id)
 }
 
 #[cfg(test)]
@@ -83,5 +114,23 @@ mod tests {
             resolve_input("https://example.com/docs").unwrap(),
             ResolvedInput::Docs { .. }
         ));
+    }
+
+    #[test]
+    fn classifies_arxiv_urls_as_papers() {
+        for (input, expected_id) in [
+            ("https://arxiv.org/abs/1706.03762", "1706.03762"),
+            ("https://arxiv.org/pdf/1706.03762.pdf", "1706.03762"),
+            ("https://arxiv.org/html/cs/9901001", "cs/9901001"),
+        ] {
+            let resolved = resolve_input(input).unwrap();
+            match resolved {
+                ResolvedInput::ArxivPaper { id, abs_url } => {
+                    assert_eq!(id, expected_id);
+                    assert_eq!(abs_url, format!("https://arxiv.org/abs/{expected_id}"));
+                }
+                _ => panic!("expected arxiv paper"),
+            }
+        }
     }
 }

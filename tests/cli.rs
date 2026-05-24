@@ -759,3 +759,53 @@ fn live_github_source_can_be_cached_and_resolved_by_path() {
     let path = String::from_utf8(output).unwrap();
     assert!(std::path::Path::new(path.trim()).join(".git").exists());
 }
+
+#[test]
+#[ignore = "live arXiv smoke test; run when network is available"]
+fn live_arxiv_paper_can_be_added_and_queried() {
+    let project = TestProject::new();
+    project
+        .ctx()
+        .arg("add")
+        .arg("https://arxiv.org/abs/1706.03762")
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .args(["--label", "attention-paper"])
+        .assert()
+        .success();
+
+    let list = project
+        .ctx()
+        .args(["list", "--kind", "arxiv", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list = String::from_utf8(list).unwrap();
+    assert!(list.contains("attention-paper"));
+    assert!(list.contains(",arxiv,"));
+
+    let output = project
+        .ctx()
+        .args([
+            "query",
+            "What architecture dispenses with recurrence and convolutions?",
+            "--label",
+            "attention-paper",
+            "--kind",
+            "arxiv",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.contains("Attention Is All You Need"));
+    assert!(stdout.contains("Transformer"));
+    assert!(stdout.contains("https://arxiv.org/abs/1706.03762"));
+}
