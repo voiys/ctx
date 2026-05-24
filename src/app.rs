@@ -5,27 +5,34 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{SecondsFormat, Utc};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use directories::UserDirs;
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use rayon::prelude::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use scraper::{Html, Selector};
-use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 
-const DEFAULT_TOP_K: usize = 5;
-const DEFAULT_BUDGET_TOKENS: usize = 20_000;
-const DEFAULT_MAX_PAGES: usize = 256;
-const DEFAULT_CRAWL_CONCURRENCY: usize = 16;
-const EMBEDDING_BATCH_SIZE: usize = 64;
-const RRF_K: f64 = 60.0;
-const AGENTS_BLOCK_START: &str = "<!-- ctx:start -->";
-const AGENTS_BLOCK_END: &str = "<!-- ctx:end -->";
+use crate::constants::{
+    AGENTS_BLOCK_END, AGENTS_BLOCK_START, DEFAULT_BUDGET_TOKENS, DEFAULT_CRAWL_CONCURRENCY,
+    DEFAULT_MAX_PAGES, DEFAULT_TOP_K, EMBEDDING_BATCH_SIZE, RRF_K,
+};
+use crate::input::resolve_input;
+use crate::manifest::{
+    allowed_resource_ids, find_manifest_resource, find_manifest_resource_index, read_manifest,
+    upsert_manifest_resource, write_manifest,
+};
+use crate::models::{
+    CandidateBase, CandidateScore, CommandStatus, Defaults, Manifest, QueryKind, ResolvedInput,
+    Resource, ResourceKind, RuntimePaths, SnapshotMetadata, SnapshotPage,
+};
+use crate::output::print_toon;
+use crate::util::{
+    content_hash, default_label_for_url, kind_str, make_executable, path_size_bytes, run_command,
+    stable_id, timestamp,
+};
 
 #[derive(Parser)]
 #[command(name = "ctx")]
@@ -146,135 +153,6 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
-#[serde(rename_all = "snake_case")]
-enum ResourceKind {
-    Source,
-    Docs,
-    Notes,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum QueryKind {
-    Docs,
-    Notes,
-}
-
-impl From<QueryKind> for ResourceKind {
-    fn from(value: QueryKind) -> Self {
-        match value {
-            QueryKind::Docs => ResourceKind::Docs,
-            QueryKind::Notes => ResourceKind::Notes,
-        }
-    }
-}
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-struct Manifest {
-    version: u32,
-    defaults: Defaults,
-    resources: Vec<Resource>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Defaults {
-    top_k: usize,
-    budget_tokens: usize,
-}
-
-impl Default for Defaults {
-    fn default() -> Self {
-        Self {
-            top_k: DEFAULT_TOP_K,
-            budget_tokens: DEFAULT_BUDGET_TOKENS,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct Resource {
-    id: String,
-    label: String,
-    kind: ResourceKind,
-    url: String,
-    reason: Option<String>,
-    current: String,
-    local_path: Option<String>,
-    created_at: String,
-    updated_at: String,
-}
-
-#[derive(Debug, Serialize)]
-struct CommandStatus<T: Serialize> {
-    command: &'static str,
-    status: &'static str,
-    result: T,
-}
-
-#[derive(Debug)]
-struct RuntimePaths {
-    project_root: PathBuf,
-    manifest_path: PathBuf,
-    ctx_dir: PathBuf,
-    home: PathBuf,
-    db_path: PathBuf,
-}
-
-#[derive(Debug)]
-enum ResolvedInput {
-    GithubSource {
-        owner: String,
-        repo: String,
-        requested_ref: Option<String>,
-        clone_url: String,
-    },
-    Docs {
-        url: String,
-    },
-    Notes {
-        url: String,
-        path: PathBuf,
-    },
-}
-
-#[derive(Debug, Serialize)]
-struct SnapshotMetadata {
-    snapshot_id: String,
-    fetched_at: String,
-    source_url: String,
-    content_hash: String,
-    page_count: usize,
-    path: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct SnapshotPage {
-    url: String,
-    content: String,
-}
-
-#[derive(Clone, Debug)]
-struct CandidateBase {
-    chunk_id: i64,
-    resource_id: String,
-    snapshot_id: String,
-    kind: String,
-    label: String,
-    source_url: String,
-    chunk_index: i64,
-    content: String,
-}
-
-#[derive(Clone, Debug)]
-struct CandidateScore {
-    base: CandidateBase,
-    final_score: f64,
-    lexical_rank: Option<usize>,
-    lexical_score: Option<f64>,
-    vector_rank: Option<usize>,
-    vector_score: Option<f64>,
 }
 
 pub fn run() -> Result<()> {
@@ -892,102 +770,6 @@ fn ensure_project(paths: &RuntimePaths) -> Result<()> {
     fs::create_dir_all(&paths.home)?;
     ensure_db(&paths.db_path)?;
     Ok(())
-}
-
-fn read_manifest(path: &Path) -> Result<Manifest> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("failed to read manifest at {}", path.display()))?;
-    Ok(serde_json::from_str(&raw)?)
-}
-
-fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_string_pretty(manifest)?)?;
-    fs::rename(tmp, path)?;
-    Ok(())
-}
-
-fn upsert_manifest_resource(manifest: &mut Manifest, mut resource: Resource) {
-    if manifest.version == 0 {
-        manifest.version = 1;
-    }
-    if let Some(existing) = manifest
-        .resources
-        .iter_mut()
-        .find(|existing| existing.label == resource.label || existing.url == resource.url)
-    {
-        resource.created_at = existing.created_at.clone();
-        *existing = resource;
-    } else {
-        manifest.resources.push(resource);
-    }
-}
-
-fn find_manifest_resource<'a>(manifest: &'a Manifest, target: &str) -> Result<&'a Resource> {
-    manifest
-        .resources
-        .iter()
-        .find(|resource| {
-            resource.label == target || resource.url == target || resource.id == target
-        })
-        .ok_or_else(|| anyhow!("resource not found: {target}"))
-}
-
-fn find_manifest_resource_index(manifest: &Manifest, target: &str) -> Result<usize> {
-    manifest
-        .resources
-        .iter()
-        .position(|resource| {
-            resource.label == target || resource.url == target || resource.id == target
-        })
-        .ok_or_else(|| anyhow!("resource not found: {target}"))
-}
-
-fn resolve_input(input: &str) -> Result<ResolvedInput> {
-    let url = Url::parse(input).map_err(|_| anyhow!("ctx add requires an absolute URL"))?;
-    match url.scheme() {
-        "http" | "https" => {
-            if url.host_str() == Some("github.com") {
-                let segments = url
-                    .path_segments()
-                    .map(|segments| segments.collect::<Vec<_>>())
-                    .unwrap_or_default();
-                if segments.len() < 2 {
-                    bail!("GitHub URL must include owner and repo");
-                }
-                let owner = segments[0].to_string();
-                let repo = segments[1].trim_end_matches(".git").to_string();
-                let requested_ref = if segments.get(2) == Some(&"tree") {
-                    segments.get(3).map(|value| value.to_string())
-                } else {
-                    None
-                };
-                Ok(ResolvedInput::GithubSource {
-                    owner,
-                    repo,
-                    requested_ref,
-                    clone_url: format!("https://github.com/{}/{}.git", segments[0], segments[1]),
-                })
-            } else {
-                Ok(ResolvedInput::Docs {
-                    url: url.to_string(),
-                })
-            }
-        }
-        "file" => {
-            let path = url
-                .to_file_path()
-                .map_err(|_| anyhow!("file URL must point to an absolute local path"))?;
-            Ok(ResolvedInput::Notes {
-                url: url.to_string(),
-                path,
-            })
-        }
-        scheme => bail!("unsupported URL scheme: {scheme}"),
-    }
 }
 
 fn cache_github_source(
@@ -1804,20 +1586,6 @@ fn list_global_resources(
     Ok(out)
 }
 
-fn path_size_bytes(path: &Path) -> Result<u64> {
-    if path.is_file() {
-        return Ok(fs::metadata(path)?.len());
-    }
-    if !path.is_dir() {
-        return Ok(0);
-    }
-    let mut total = 0u64;
-    for entry in fs::read_dir(path)? {
-        total += path_size_bytes(&entry?.path())?;
-    }
-    Ok(total)
-}
-
 fn snapshots_for_resources(
     db_path: &Path,
     resources: &[Resource],
@@ -1924,48 +1692,6 @@ fn prune_resource_cache(db_path: &Path, resource: &Resource) -> Result<bool> {
     Ok(true)
 }
 
-#[cfg(unix)]
-fn make_executable(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-fn allowed_resource_ids(
-    manifest: &Manifest,
-    label: Option<&str>,
-    kind: Option<ResourceKind>,
-) -> Result<BTreeSet<String>> {
-    let mut out = BTreeSet::new();
-    for resource in &manifest.resources {
-        if matches!(resource.kind, ResourceKind::Source) {
-            continue;
-        }
-        if let Some(label) = label
-            && resource.label != label
-        {
-            continue;
-        }
-        if let Some(kind) = kind
-            && resource.kind != kind
-        {
-            continue;
-        }
-        out.insert(resource.id.clone());
-    }
-    if label.is_some() && out.is_empty() {
-        bail!("no queryable docs/notes resource matched label");
-    }
-    Ok(out)
-}
-
 fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -2010,16 +1736,6 @@ fn fts_query(input: &str) -> String {
 
 fn estimate_tokens(content: &str) -> usize {
     content.len().div_ceil(4)
-}
-
-fn run_command(command: &mut Command, label: &str) -> Result<()> {
-    let output = command
-        .output()
-        .with_context(|| format!("failed to run {label}"))?;
-    if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    Ok(())
 }
 
 fn upsert_agents_block(project_root: &Path) -> Result<()> {
@@ -2070,46 +1786,6 @@ Source repos are explored on disk. Docs and notes are returned as cited context 
     Ok(())
 }
 
-fn print_toon<T: Serialize>(value: T) -> Result<()> {
-    let encoded = toon_format::encode_default(&value)?;
-    println!("{encoded}");
-    Ok(())
-}
-
-fn timestamp() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
-}
-
-fn stable_id(input: &str) -> String {
-    let hash = content_hash(input);
-    hash[..16].to_string()
-}
-
-fn content_hash(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-fn default_label_for_url(url: &str) -> String {
-    Url::parse(url)
-        .ok()
-        .and_then(|url| {
-            url.host_str()
-                .map(|host| host.trim_start_matches("www.").replace(['.', ':'], "-"))
-        })
-        .filter(|label| !label.is_empty())
-        .unwrap_or_else(|| "resource".to_string())
-}
-
-fn kind_str(kind: ResourceKind) -> &'static str {
-    match kind {
-        ResourceKind::Source => "source",
-        ResourceKind::Docs => "docs",
-        ResourceKind::Notes => "notes",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2129,62 +1805,6 @@ mod tests {
     }
 
     #[test]
-    fn classifies_github_as_source() {
-        let resolved = resolve_input("https://github.com/owner/repo/tree/v1").unwrap();
-        match resolved {
-            ResolvedInput::GithubSource {
-                owner,
-                repo,
-                requested_ref,
-                ..
-            } => {
-                assert_eq!(owner, "owner");
-                assert_eq!(repo, "repo");
-                assert_eq!(requested_ref.as_deref(), Some("v1"));
-            }
-            _ => panic!("expected github source"),
-        }
-    }
-
-    #[test]
-    fn rejects_bare_paths() {
-        assert!(resolve_input("/tmp/notes.md").is_err());
-    }
-
-    #[test]
-    fn resolver_accepts_only_absolute_urls() {
-        for input in ["owner/repo", "npm:zod", "docs/index.html", "../notes.md"] {
-            assert!(resolve_input(input).is_err(), "{input} should be rejected");
-        }
-        assert!(matches!(
-            resolve_input("https://example.com/docs").unwrap(),
-            ResolvedInput::Docs { .. }
-        ));
-    }
-
-    #[test]
-    fn queryable_resources_never_include_sources() {
-        let manifest = Manifest {
-            version: 1,
-            defaults: Defaults::default(),
-            resources: vec![
-                test_resource("source-id", "source", ResourceKind::Source),
-                test_resource("docs-id", "docs", ResourceKind::Docs),
-                test_resource("notes-id", "notes", ResourceKind::Notes),
-            ],
-        };
-
-        let all = allowed_resource_ids(&manifest, None, None).unwrap();
-        assert_eq!(all, BTreeSet::from(["docs-id".into(), "notes-id".into()]));
-
-        let source_label = allowed_resource_ids(&manifest, Some("source"), None);
-        assert!(source_label.is_err());
-
-        let docs = allowed_resource_ids(&manifest, None, Some(ResourceKind::Docs)).unwrap();
-        assert_eq!(docs, BTreeSet::from(["docs-id".into()]));
-    }
-
-    #[test]
     fn crawl_filter_stays_under_seed_path_and_skips_assets() {
         let seed = Url::parse("https://example.com/docs/guide/").unwrap();
         let child = Url::parse("https://example.com/docs/guide/install").unwrap();
@@ -2198,17 +1818,4 @@ mod tests {
         assert!(!is_crawlable_doc_url(&seed, &asset));
     }
 
-    fn test_resource(id: &str, label: &str, kind: ResourceKind) -> Resource {
-        Resource {
-            id: id.to_string(),
-            label: label.to_string(),
-            kind,
-            url: format!("https://example.com/{label}"),
-            reason: None,
-            current: "current".to_string(),
-            local_path: None,
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            updated_at: "2026-01-01T00:00:00Z".to_string(),
-        }
-    }
 }
