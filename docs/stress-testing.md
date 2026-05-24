@@ -1,6 +1,6 @@
 # Docs Stress Testing
 
-`scripts/docs_stress.py` is the crawler/indexer stress harness. It is inspired by autoresearch-style runs: fixed targets, isolated state, append-only JSONL observations, and a markdown summary that can be compared across attempts.
+`scripts/docs_stress.py` is the crawler/indexer stress harness. It is inspired by `pi-autoresearch`-style runs: fixed targets, isolated state, append-only JSONL observations, and a markdown summary that can be compared across attempts or resumed after context loss.
 
 The harness defaults are intentionally polite:
 
