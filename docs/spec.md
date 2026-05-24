@@ -118,6 +118,8 @@ Flags:
 - `--label <name>`: stable project-local name
 - `--reason <text>`: why this resource belongs to the project
 - `--no-index`: fetch/snapshot only
+- `--max-pages <n>`: maximum docs pages to crawl, default `256`
+- `--concurrency <n>`: docs crawl worker count, default `16`
 - `--cwd <path>`: project root override
 
 ### `ctx update <label-or-url>`
@@ -129,6 +131,8 @@ For source resources, report the current pin. Changing source refs should be exp
 Flags:
 
 - `--force`: create a new snapshot even if the content hash did not change
+- `--max-pages <n>`: maximum docs pages to crawl, default `256`
+- `--concurrency <n>`: docs crawl worker count, default `16`
 - `--cwd <path>`: project root override
 
 ### `ctx sync`
@@ -153,7 +157,7 @@ Flags:
 - `--kind docs|notes`: restrict by kind
 - `--cwd <path>`: project root override
 
-Retrieval should use code-aware lexical search plus semantic search, fused with reciprocal rank fusion. V1 may start with lexical search if embedding support is not yet wired.
+Retrieval uses code-aware lexical search plus semantic search, fused with reciprocal rank fusion. Set `CTX_EMBEDDINGS=off` only for tests or constrained environments.
 
 ### `ctx show [label-or-url]`
 
@@ -213,6 +217,15 @@ Flags:
 
 - `--cwd <path>`: project root override
 
+### `ctx install`
+
+Copy the current `ctx` executable into a user-local binary directory.
+
+Flags:
+
+- `--bin-dir <path>`: override install directory; defaults to `~/.local/bin`
+- `--force`: replace an existing `ctx` binary
+
 ## Retrieval Output
 
 Default query output should include:
@@ -243,6 +256,17 @@ Each result should include:
 - matched tokens
 - chunk id
 - parent id
+
+## Docs Crawling
+
+Docs crawling is recursive and parallel. It follows same-origin links under the seed path, strips fragments and query strings, skips common static assets, and stores page-level citations in the snapshot.
+
+Default crawl limits:
+
+- max pages: `256`
+- concurrency: `16`
+
+Queries never update docs implicitly. `ctx update <label>` creates a new immutable snapshot when content changes.
 
 ## Architecture
 

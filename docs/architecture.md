@@ -50,4 +50,20 @@ Target retrieval flow:
 7. Pack top results into the default budget
 8. Emit structured stdout
 
-V1 can land lexical retrieval first, then add embeddings and RRF without changing the command contract.
+Embeddings are generated during indexing with `fastembed` and stored directly on chunks in SQLite. Query-time vector scoring runs over embedded chunks, then lexical and vector candidates are fused with reciprocal rank fusion.
+
+## Local Install
+
+Use:
+
+```sh
+make install-local
+```
+
+This runs a release build and then calls:
+
+```sh
+./target/release/ctx install --force
+```
+
+The install command copies the current executable to `~/.local/bin/ctx` by default.

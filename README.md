@@ -25,6 +25,7 @@ ctx update <label>
 ctx sync
 ctx remove <label>
 ctx doctor
+ctx install
 ```
 
 All command output is optimized for agent consumption. Human progress and diagnostics belong on stderr; structured results belong on stdout.
@@ -39,6 +40,16 @@ All command output is optimized for agent consumption. Human progress and diagno
 
 Source repositories are pinned to a concrete ref and cached globally. Documentation and notes are captured as immutable snapshots with timestamps and content hashes.
 
+## Install Locally
+
+From this checkout:
+
+```sh
+make install-local
+```
+
+That builds the release binary and copies it to `~/.local/bin/ctx`. Make sure `~/.local/bin` is on your `PATH`.
+
 ## Status
 
-This repository is a fresh implementation. The initial target is a useful Rust CLI with a stable manifest format, global cache layout, docs/notes indexing, and project-scoped query results.
+This repository is a fresh implementation with the v1 core in place: project manifests, GitHub source caching, recursive docs snapshots, notes snapshots, SQLite FTS indexing, local embeddings, RRF hybrid retrieval, global listing, cache pruning, pointer validation, and a local install command.
