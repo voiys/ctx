@@ -8,6 +8,8 @@ mod crawl;
 mod embeddings;
 mod source;
 mod snapshot;
+mod storage;
+mod retrieve;
 mod app;
 
 fn main() {
