@@ -111,6 +111,7 @@ Behavior:
 
 - GitHub repo URL: resolve, pin, clone/cache globally
 - Docs URL: crawl, snapshot, index globally
+- Docs URL: try nearby `llms.txt` discovery before ordinary link crawling
 - Notes file URL: snapshot, index globally
 Flags:
 

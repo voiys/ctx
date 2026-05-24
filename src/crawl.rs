@@ -1,7 +1,11 @@
 use std::collections::{BTreeSet, HashSet};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use rayon::prelude::*;
+use reqwest::StatusCode;
+use reqwest::header::{CONTENT_TYPE, RETRY_AFTER};
 use scraper::{Html, Selector};
 use url::Url;
 
@@ -16,15 +20,44 @@ pub(crate) fn crawl_docs(
     let max_pages = max_pages.max(1);
     let concurrency = concurrency.max(1);
     let client = reqwest::blocking::Client::builder()
-        .user_agent("ctx/0.1")
+        .user_agent("ctx/0.1 (+https://github.com/voiys/ctx; local docs indexer)")
         .timeout(std::time::Duration::from_secs(20))
         .build()?;
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(concurrency)
         .build()?;
-    let mut seen = HashSet::from([canonical_url(&seed_url)]);
-    let mut frontier = vec![seed_url.clone()];
+    let mut seen = HashSet::new();
+    let mut frontier = Vec::new();
     let mut pages = Vec::new();
+
+    for llms_url in llms_candidate_urls(&seed_url) {
+        let canonical = canonical_url(&llms_url);
+        if !seen.insert(canonical) {
+            continue;
+        }
+        let Ok(fetched_page) = fetch_doc_page(&client, &llms_url) else {
+            continue;
+        };
+        for link in &fetched_page.links {
+            if is_crawlable_llms_url(&llms_url, link) {
+                let canonical = canonical_url(link);
+                if seen.insert(canonical.clone()) {
+                    frontier.push(link.clone());
+                }
+            }
+        }
+        pages.push(SnapshotPage {
+            url: fetched_page.url,
+            content: fetched_page.text,
+        });
+        if pages.len() >= max_pages {
+            return Ok(pages);
+        }
+    }
+
+    if seen.insert(canonical_url(&seed_url)) {
+        frontier.push(seed_url.clone());
+    }
 
     while !frontier.is_empty() && pages.len() < max_pages {
         let remaining = max_pages - pages.len();
@@ -74,13 +107,60 @@ struct FetchedDocPage {
 
 fn fetch_doc_page(client: &reqwest::blocking::Client, url: &Url) -> Result<FetchedDocPage> {
     eprintln!("fetching docs page: {url}");
-    let html = client.get(url.clone()).send()?.error_for_status()?.text()?;
-    let links = html_links(url, &html);
+    let response = send_with_backoff(client, url)?;
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let body = response.text()?;
+    let links = page_links(url, &body);
+    let text = if content_type.contains("html") || looks_like_html(&body) {
+        html_to_text(&body)
+    } else {
+        body
+    };
     Ok(FetchedDocPage {
         url: canonical_url(url),
-        text: html_to_text(&html),
+        text,
         links,
     })
+}
+
+fn send_with_backoff(
+    client: &reqwest::blocking::Client,
+    url: &Url,
+) -> Result<reqwest::blocking::Response> {
+    let mut delay = Duration::from_millis(500);
+    for attempt in 0..3 {
+        let response = client.get(url.clone()).send()?;
+        if !matches!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+        ) {
+            return Ok(response.error_for_status()?);
+        }
+        if attempt == 2 {
+            return Ok(response.error_for_status()?);
+        }
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(delay);
+        thread::sleep(retry_after);
+        delay *= 2;
+    }
+    unreachable!("retry loop returns or errors")
+}
+
+fn page_links(base: &Url, body: &str) -> Vec<Url> {
+    let mut links = html_links(base, body);
+    links.extend(text_links(base, body));
+    dedupe_urls(links)
 }
 
 fn html_links(base: &Url, html: &str) -> Vec<Url> {
@@ -91,6 +171,47 @@ fn html_links(base: &Url, html: &str) -> Vec<Url> {
         .filter_map(|node| node.value().attr("href"))
         .filter_map(|href| base.join(href).ok())
         .map(strip_fragment_and_query)
+        .collect()
+}
+
+fn text_links(base: &Url, text: &str) -> Vec<Url> {
+    let mut out = Vec::new();
+    for href in markdown_link_targets(text).chain(bare_url_targets(text)) {
+        if let Ok(url) = base.join(&href) {
+            out.push(strip_fragment_and_query(url));
+        }
+    }
+    out
+}
+
+fn markdown_link_targets(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.match_indices("](").filter_map(|(start, _)| {
+        let href_start = start + 2;
+        let href_end = text[href_start..].find(')')? + href_start;
+        Some(text[href_start..href_end].trim().to_string())
+    })
+}
+
+fn bare_url_targets(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split_whitespace().filter_map(|part| {
+        let trimmed = part.trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | '.'
+            )
+        });
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            Some(trimmed.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn dedupe_urls(urls: Vec<Url>) -> Vec<Url> {
+    let mut seen = HashSet::new();
+    urls.into_iter()
+        .filter(|url| seen.insert(canonical_url(url)))
         .collect()
 }
 
@@ -106,6 +227,45 @@ pub(crate) fn is_crawlable_doc_url(seed: &Url, candidate: &Url) -> bool {
         return false;
     }
     !looks_like_asset(candidate.path())
+}
+
+fn is_crawlable_llms_url(llms_url: &Url, candidate: &Url) -> bool {
+    if candidate.scheme() != llms_url.scheme()
+        || candidate.host_str() != llms_url.host_str()
+        || candidate.port_or_known_default() != llms_url.port_or_known_default()
+    {
+        return false;
+    }
+    let Some(prefix) = llms_parent_path(llms_url) else {
+        return false;
+    };
+    candidate.path().starts_with(&prefix) && !looks_like_asset(candidate.path())
+}
+
+fn llms_candidate_urls(seed: &Url) -> Vec<Url> {
+    let mut candidates = Vec::new();
+    if let Ok(url) = Url::parse(&format!("{}/llms.txt", seed.as_str().trim_end_matches('/'))) {
+        candidates.push(url);
+    }
+    if let Ok(url) = seed.join("llms.txt") {
+        candidates.push(url);
+    }
+    let mut origin = seed.clone();
+    origin.set_path("/llms.txt");
+    origin.set_query(None);
+    origin.set_fragment(None);
+    candidates.push(origin);
+    dedupe_urls(candidates)
+}
+
+fn llms_parent_path(url: &Url) -> Option<String> {
+    let path = url.path();
+    let parent = path.rsplit_once('/')?.0;
+    if parent.is_empty() {
+        Some("/".to_string())
+    } else {
+        Some(format!("{}/", parent.trim_end_matches('/')))
+    }
 }
 
 fn normalized_crawl_root(path: &str) -> String {
@@ -156,6 +316,15 @@ fn html_to_text(html: &str) -> String {
     }
 }
 
+fn looks_like_html(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    trimmed.starts_with("<!DOCTYPE html")
+        || trimmed.starts_with("<html")
+        || trimmed.contains("<body")
+        || trimmed.contains("<main")
+        || trimmed.contains("<article")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +341,45 @@ mod tests {
         assert!(!is_crawlable_doc_url(&seed, &sibling));
         assert!(!is_crawlable_doc_url(&seed, &other_host));
         assert!(!is_crawlable_doc_url(&seed, &asset));
+    }
+
+    #[test]
+    fn llms_candidates_cover_directory_and_origin_conventions() {
+        let seed = Url::parse("https://example.com/docs/overview").unwrap();
+        let candidates = llms_candidate_urls(&seed)
+            .into_iter()
+            .map(|url| url.to_string())
+            .collect::<Vec<_>>();
+
+        assert!(candidates.contains(&"https://example.com/docs/overview/llms.txt".to_string()));
+        assert!(candidates.contains(&"https://example.com/docs/llms.txt".to_string()));
+        assert!(candidates.contains(&"https://example.com/llms.txt".to_string()));
+    }
+
+    #[test]
+    fn llms_links_can_discover_sibling_docs_pages() {
+        let llms = Url::parse("https://example.com/docs/llms.txt").unwrap();
+        let child = Url::parse("https://example.com/docs/guide.md").unwrap();
+        let sibling_root = Url::parse("https://example.com/api/reference.md").unwrap();
+        let asset = Url::parse("https://example.com/docs/logo.svg").unwrap();
+
+        assert!(is_crawlable_llms_url(&llms, &child));
+        assert!(!is_crawlable_llms_url(&llms, &sibling_root));
+        assert!(!is_crawlable_llms_url(&llms, &asset));
+    }
+
+    #[test]
+    fn text_links_extract_markdown_and_bare_urls() {
+        let base = Url::parse("https://example.com/docs/llms.txt").unwrap();
+        let links = text_links(
+            &base,
+            "- [Guide](guide.md)\nSee https://example.com/docs/api.md.",
+        )
+        .into_iter()
+        .map(|url| url.to_string())
+        .collect::<Vec<_>>();
+
+        assert!(links.contains(&"https://example.com/docs/guide.md".to_string()));
+        assert!(links.contains(&"https://example.com/docs/api.md".to_string()));
     }
 }

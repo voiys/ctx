@@ -383,6 +383,65 @@ fn docs_crawl_recursively_indexes_linked_pages() {
 }
 
 #[test]
+fn docs_crawl_discovers_llms_txt_links() {
+    let site = FixtureSite::new(HashMap::from([
+        (
+            "/docs".to_string(),
+            "<html><body><main>Docs home without direct llms-linked token.</main></body></html>"
+                .to_string(),
+        ),
+        (
+            "/docs/llms.txt".to_string(),
+            "- [Guide](guide.md)\n- [API](api.md)".to_string(),
+        ),
+        (
+            "/docs/guide.md".to_string(),
+            "Guide page mentions CTX_LLMS_GUIDE_TOKEN.".to_string(),
+        ),
+        (
+            "/docs/api.md".to_string(),
+            "API page mentions CTX_LLMS_API_TOKEN.".to_string(),
+        ),
+    ]));
+    let project = TestProject::new();
+
+    project
+        .ctx()
+        .arg("add")
+        .arg(format!("{}/docs", site.base_url))
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .args(["--label", "llms-docs"])
+        .assert()
+        .success();
+
+    let output = project
+        .ctx()
+        .args(["query", "CTX_LLMS_API_TOKEN", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.contains("llms-docs"));
+    assert!(stdout.contains("CTX_LLMS_API_TOKEN"));
+
+    let show = project
+        .ctx()
+        .args(["show", "llms-docs", "--snapshots", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let show = String::from_utf8(show).unwrap();
+    assert!(show.contains(",4,") || show.contains("page_count: 4"));
+}
+
+#[test]
 fn update_keeps_pointer_on_noop_and_moves_on_content_change() {
     let site = FixtureSite::new(HashMap::from([(
         "/".to_string(),
