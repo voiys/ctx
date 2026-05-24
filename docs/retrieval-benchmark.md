@@ -37,14 +37,41 @@ Each run writes under `bench-results/retrieval/<timestamp>`:
 
 The harness intentionally uses a local HTTP server instead of live docs during scoring. Live docs are used for research, but benchmark scoring must stay stable so retrieval regressions are attributable to `ctx`, not third-party site changes.
 
+Default pass criteria:
+
+- every `must_include` answer term appears in the packed `ctx query` output
+- when embeddings are on, every query must show `rrf_hybrid`
+- every query must show `source_prior: llms_txt`
+
+Negative controls:
+
+```sh
+python3 scripts/retrieval_bench.py --mode small --embeddings off --require-hybrid on --limit 1
+```
+
+This must fail because lexical-only retrieval cannot report `rrf_hybrid`.
+
+```sh
+python3 - <<'PY' > /tmp/ctx-bad-retrieval-case.jsonl
+import json
+case = json.loads(open("benchmarks/retrieval_cases.jsonl").readline())
+case["must_include"].append("CTX_IMPOSSIBLE_SENTINEL")
+print(json.dumps(case))
+PY
+cargo build --release
+python3 scripts/retrieval_bench.py --case-file /tmp/ctx-bad-retrieval-case.jsonl --mode small --embeddings on
+```
+
+This must fail because an expected answer term is absent from the indexed corpus.
+
 Reference run on 2026-05-24:
 
 - command: `make bench-retrieval`
-- run id: `20260524T110537Z`
+- run id: `20260524T155319Z`
 - cases: 22
 - modes: `small`, `large`
 - large noise: 64 extra pages per library
 - result: `22/22` passed in both modes
 - hybrid evidence: `22/22` queries reported `rrf_hybrid` in both modes
 - `llms.txt` prior evidence: `22/22` queries reported `source_prior: llms_txt` in both modes
-- query mean/max: small `0.054s / 0.056s`, large `0.057s / 0.061s`
+- query mean/max: small `0.052s / 0.053s`, large `0.056s / 0.058s`

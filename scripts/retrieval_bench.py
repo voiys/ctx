@@ -267,6 +267,10 @@ def run_queries(
         del env["CTX_EMBEDDINGS"]
 
     rows = []
+    require_hybrid = args.require_hybrid == "on" or (
+        args.require_hybrid == "auto" and args.embeddings == "on"
+    )
+    require_llms_prior = args.require_llms_prior == "on"
     for case in cases:
         command = [
             str(args.ctx_bin),
@@ -283,6 +287,13 @@ def run_queries(
         code, elapsed, stdout, stderr = run_command(command, env, args.query_timeout_s, args.cwd)
         lower = stdout.lower()
         missing = [term for term in case["must_include"] if term.lower() not in lower]
+        hybrid_seen = "rrf_hybrid" in lower
+        llms_prior_seen = "source_prior: llms_txt" in lower
+        failed_checks = []
+        if require_hybrid and not hybrid_seen:
+            failed_checks.append("hybrid retrieval was not observed")
+        if require_llms_prior and not llms_prior_seen:
+            failed_checks.append("llms.txt source prior was not observed")
         row = {
             "phase": "query",
             "mode": mode,
@@ -292,11 +303,12 @@ def run_queries(
             "question": case["question"],
             "exit_code": code,
             "elapsed_s": round(elapsed, 3),
-            "passed": code == 0 and not missing,
+            "passed": code == 0 and not missing and not failed_checks,
             "missing_terms": missing,
+            "failed_checks": failed_checks,
             "must_include": case["must_include"],
-            "hybrid_seen": "rrf_hybrid" in lower,
-            "llms_prior_seen": "source_prior: llms_txt" in lower,
+            "hybrid_seen": hybrid_seen,
+            "llms_prior_seen": llms_prior_seen,
             "stdout_path": str(run_dir / f"{mode}-{case['id']}.stdout"),
             "stderr_tail": stderr[-1200:],
         }
@@ -322,6 +334,8 @@ def summarize(run_dir: pathlib.Path, rows: list[dict[str, Any]], args: argparse.
         f"- top_k: {args.top_k}",
         f"- budget: {args.budget}",
         f"- large_noise_pages_per_library: {args.large_noise_pages}",
+        f"- require_hybrid: {args.require_hybrid}",
+        f"- require_llms_prior: {args.require_llms_prior}",
         "",
     ]
     for mode in sorted({row["mode"] for row in query_rows}):
@@ -354,7 +368,10 @@ def summarize(run_dir: pathlib.Path, rows: list[dict[str, Any]], args: argparse.
             lines.append("### Failures")
             lines.append("")
             for row in failures:
-                lines.append(f"- {row['id']}: missing {row['missing_terms']}")
+                lines.append(
+                    f"- {row['id']}: missing {row['missing_terms']}; "
+                    f"failed checks {row['failed_checks']}"
+                )
             lines.append("")
     (run_dir / "summary.md").write_text("\n".join(lines), encoding="utf-8")
 
@@ -403,6 +420,8 @@ def main() -> None:
     parser.add_argument("--crawl-concurrency", type=int, default=4)
     parser.add_argument("--index-timeout-s", type=int, default=240)
     parser.add_argument("--query-timeout-s", type=int, default=60)
+    parser.add_argument("--require-hybrid", choices=["auto", "on", "off"], default="auto")
+    parser.add_argument("--require-llms-prior", choices=["on", "off"], default="on")
     parser.add_argument("--cwd", type=pathlib.Path, default=pathlib.Path.cwd())
     args = parser.parse_args()
 
