@@ -1,19 +1,19 @@
+mod agents;
+mod app;
 mod constants;
-mod models;
-mod output;
-mod util;
-mod manifest;
-mod input;
+mod context;
 mod crawl;
 mod embeddings;
-mod source;
-mod snapshot;
-mod storage;
-mod retrieve;
-mod context;
-mod agents;
+mod input;
 mod install;
-mod app;
+mod manifest;
+mod models;
+mod output;
+mod retrieve;
+mod snapshot;
+mod source;
+mod storage;
+mod util;
 
 fn main() {
     if let Err(error) = app::run() {

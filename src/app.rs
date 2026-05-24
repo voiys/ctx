@@ -7,10 +7,10 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 use url::Url;
 
+use crate::agents::upsert_agents_block;
 use crate::constants::{
     DEFAULT_BUDGET_TOKENS, DEFAULT_CRAWL_CONCURRENCY, DEFAULT_MAX_PAGES, DEFAULT_TOP_K,
 };
-use crate::agents::upsert_agents_block;
 use crate::context::AppContext;
 use crate::input::resolve_input;
 use crate::install::install;
@@ -24,15 +24,13 @@ use crate::models::{
 };
 use crate::output::print_toon;
 use crate::retrieve::query_index;
-use crate::source::{cache_github_source, validate_source_pointer};
 use crate::snapshot::{snapshot_docs, snapshot_notes};
+use crate::source::{cache_github_source, validate_source_pointer};
 use crate::storage::{
     current_content_hash, ensure_db, index_snapshot, list_global_resources, prune_resource_cache,
     snapshot_path_for_pointer, snapshots_for_resources, upsert_global_resource,
 };
-use crate::util::{
-    default_label_for_url, stable_id, timestamp,
-};
+use crate::util::{default_label_for_url, stable_id, timestamp};
 
 #[derive(Parser)]
 #[command(name = "ctx")]
