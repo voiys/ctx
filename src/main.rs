@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{SecondsFormat, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use directories::UserDirs;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -442,7 +442,8 @@ fn update(cwd: Option<PathBuf>, target: &str, force: bool) -> Result<()> {
                 true,
                 &paths.db_path,
             )?;
-            let changed = snapshot.snapshot_id != resource.current;
+            let changed = current_content_hash(&paths.db_path, &resource.id, &resource.current)?
+                .is_none_or(|hash| hash != snapshot.content_hash);
             if changed || force {
                 resource.current = snapshot.snapshot_id.clone();
                 resource.local_path = Some(snapshot.path.clone());
@@ -451,6 +452,8 @@ fn update(cwd: Option<PathBuf>, target: &str, force: bool) -> Result<()> {
                 write_manifest(&paths.manifest_path, &manifest)?;
                 upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
                 index_snapshot(&paths.db_path, &resource, &snapshot)?;
+            } else {
+                let _ = fs::remove_dir_all(&snapshot.path);
             }
             print_toon(CommandStatus {
                 command: "update",
@@ -475,7 +478,8 @@ fn update(cwd: Option<PathBuf>, target: &str, force: bool) -> Result<()> {
                 true,
                 &paths.db_path,
             )?;
-            let changed = snapshot.snapshot_id != resource.current;
+            let changed = current_content_hash(&paths.db_path, &resource.id, &resource.current)?
+                .is_none_or(|hash| hash != snapshot.content_hash);
             if changed || force {
                 resource.current = snapshot.snapshot_id.clone();
                 resource.local_path = Some(snapshot.path.clone());
@@ -484,6 +488,8 @@ fn update(cwd: Option<PathBuf>, target: &str, force: bool) -> Result<()> {
                 write_manifest(&paths.manifest_path, &manifest)?;
                 upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
                 index_snapshot(&paths.db_path, &resource, &snapshot)?;
+            } else {
+                let _ = fs::remove_dir_all(&snapshot.path);
             }
             print_toon(CommandStatus {
                 command: "update",
@@ -1304,6 +1310,23 @@ fn snapshots_for_resources(
         }
     }
     Ok(out)
+}
+
+fn current_content_hash(
+    db_path: &Path,
+    resource_id: &str,
+    snapshot_id: &str,
+) -> Result<Option<String>> {
+    ensure_db(db_path)?;
+    let conn = Connection::open(db_path)?;
+    let hash = conn
+        .query_row(
+            "SELECT content_hash FROM snapshots WHERE resource_id = ?1 AND snapshot_id = ?2",
+            params![resource_id, snapshot_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(hash)
 }
 
 fn allowed_resource_ids(
