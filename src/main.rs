@@ -4,6 +4,7 @@ mod output;
 mod util;
 mod manifest;
 mod input;
+mod crawl;
 mod app;
 
 fn main() {
