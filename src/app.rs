@@ -27,8 +27,10 @@ use crate::retrieve::query_index;
 use crate::snapshot::{snapshot_docs, snapshot_notes};
 use crate::source::{cache_github_source, validate_source_pointer};
 use crate::storage::{
-    current_content_hash, ensure_db, index_snapshot, list_global_resources, prune_resource_cache,
-    snapshot_path_for_pointer, snapshots_for_resources, upsert_global_resource,
+    allowed_global_resource_ids, current_content_hash, ensure_db, find_global_resource,
+    index_snapshot, list_global_resource_models, list_global_resources, prune_resource_cache,
+    remove_global_resource, snapshot_path_for_pointer, snapshots_for_resources,
+    upsert_global_resource,
 };
 use crate::util::{default_label_for_url, stable_id, timestamp};
 
@@ -247,8 +249,8 @@ fn add(
 ) -> Result<()> {
     let app = AppContext::load(cwd)?;
     let paths = &app.paths;
-    app.ensure_project()?;
-    let mut manifest = read_manifest(&paths.manifest_path)?;
+    app.ensure_global_storage()?;
+    let mut manifest = read_optional_manifest(paths)?;
     let resolved = resolve_input(input_url)?;
     let now = timestamp();
 
@@ -331,8 +333,13 @@ fn add(
         }
     };
 
-    upsert_manifest_resource(&mut manifest, resource.clone());
-    write_manifest(&paths.manifest_path, &manifest)?;
+    let linked_to_project = if let Some(manifest) = &mut manifest {
+        upsert_manifest_resource(manifest, resource.clone());
+        write_manifest(&paths.manifest_path, manifest)?;
+        true
+    } else {
+        false
+    };
 
     print_toon(CommandStatus {
         command: "add",
@@ -340,6 +347,7 @@ fn add(
         result: json!({
             "resource": resource,
             "extra": extra,
+            "linked_to_current_project": linked_to_project,
         }),
     })
 }
@@ -353,10 +361,16 @@ fn update(
 ) -> Result<()> {
     let app = AppContext::load(cwd)?;
     let paths = &app.paths;
-    app.ensure_project()?;
-    let mut manifest = read_manifest(&paths.manifest_path)?;
-    let index = find_manifest_resource_index(&manifest, target)?;
-    let mut resource = manifest.resources[index].clone();
+    app.ensure_global_storage()?;
+    let mut manifest = read_optional_manifest(paths)?;
+    let linked_index = manifest
+        .as_ref()
+        .and_then(|manifest| find_manifest_resource_index(manifest, target).ok());
+    let mut resource = if let (Some(manifest), Some(index)) = (manifest.as_ref(), linked_index) {
+        manifest.resources[index].clone()
+    } else {
+        find_global_resource(&paths.db_path, target)?
+    };
 
     match resource.kind {
         ResourceKind::Source => {
@@ -383,8 +397,10 @@ fn update(
                 resource.current = snapshot.snapshot_id.clone();
                 resource.local_path = Some(snapshot.path.clone());
                 resource.updated_at = timestamp();
-                manifest.resources[index] = resource.clone();
-                write_manifest(&paths.manifest_path, &manifest)?;
+                if let (Some(manifest), Some(index)) = (&mut manifest, linked_index) {
+                    manifest.resources[index] = resource.clone();
+                    write_manifest(&paths.manifest_path, manifest)?;
+                }
                 upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
                 index_snapshot(&paths.db_path, &resource, &snapshot)?;
             } else {
@@ -412,8 +428,10 @@ fn update(
                 resource.current = snapshot.snapshot_id.clone();
                 resource.local_path = Some(snapshot.path.clone());
                 resource.updated_at = timestamp();
-                manifest.resources[index] = resource.clone();
-                write_manifest(&paths.manifest_path, &manifest)?;
+                if let (Some(manifest), Some(index)) = (&mut manifest, linked_index) {
+                    manifest.resources[index] = resource.clone();
+                    write_manifest(&paths.manifest_path, manifest)?;
+                }
                 upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
                 index_snapshot(&paths.db_path, &resource, &snapshot)?;
             } else {
@@ -505,10 +523,19 @@ fn query(
 ) -> Result<()> {
     let app = AppContext::load(cwd)?;
     let paths = &app.paths;
-    app.ensure_project()?;
-    ensure_db(&paths.db_path)?;
-    let manifest = read_manifest(&paths.manifest_path)?;
-    let allowed = allowed_resource_ids(&manifest, label.as_deref(), kind.map(Into::into))?;
+    app.ensure_global_storage()?;
+    let manifest = read_optional_manifest(paths)?;
+    let scope = if manifest.is_some() {
+        "project"
+    } else {
+        "global"
+    };
+    let query_kind = kind.map(Into::into);
+    let allowed = if let Some(manifest) = &manifest {
+        allowed_resource_ids(manifest, label.as_deref(), query_kind)?
+    } else {
+        allowed_global_resource_ids(&paths.db_path, label.as_deref(), query_kind)?
+    };
     let results = query_index(
         &paths.db_path,
         question,
@@ -525,6 +552,7 @@ fn query(
             "top_k": top_k,
             "budget_tokens": budget_tokens,
             "project_root": paths.project_root,
+            "scope": scope,
             "debug": debug,
             "results": results,
         }),
@@ -534,12 +562,26 @@ fn query(
 fn show(cwd: Option<PathBuf>, target: Option<String>, snapshots: bool) -> Result<()> {
     let app = AppContext::load(cwd)?;
     let paths = &app.paths;
-    app.ensure_project()?;
-    let manifest = read_manifest(&paths.manifest_path)?;
-    let resources = if let Some(target) = target {
-        vec![find_manifest_resource(&manifest, &target)?.clone()]
+    app.ensure_global_storage()?;
+    let manifest = read_optional_manifest(paths)?;
+    let scope = if manifest.is_some() {
+        "project"
     } else {
+        "global"
+    };
+    let resources = if let Some(target) = target {
+        if let Some(manifest) = &manifest {
+            find_manifest_resource(manifest, &target)
+                .cloned()
+                .or_else(|_| find_global_resource(&paths.db_path, &target))
+                .map(|resource| vec![resource])?
+        } else {
+            vec![find_global_resource(&paths.db_path, &target)?]
+        }
+    } else if let Some(manifest) = &manifest {
         manifest.resources.clone()
+    } else {
+        list_global_resource_models(&paths.db_path, None)?
     };
     let snapshot_rows = if snapshots {
         snapshots_for_resources(&paths.db_path, &resources)?
@@ -552,6 +594,7 @@ fn show(cwd: Option<PathBuf>, target: Option<String>, snapshots: bool) -> Result
         result: json!({
             "project_root": paths.project_root,
             "manifest_path": paths.manifest_path,
+            "scope": scope,
             "resources": resources,
             "snapshots": snapshot_rows,
         }),
@@ -601,13 +644,19 @@ fn list(cwd: Option<PathBuf>, project_only: bool, kind: Option<ResourceKind>) ->
 fn print_source_path(cwd: Option<PathBuf>, target: &str) -> Result<()> {
     let app = AppContext::load(cwd)?;
     let paths = &app.paths;
-    app.ensure_project()?;
-    let manifest = read_manifest(&paths.manifest_path)?;
-    let resource = find_manifest_resource(&manifest, target)?;
+    app.ensure_global_storage()?;
+    let manifest = read_optional_manifest(paths)?;
+    let resource = if let Some(manifest) = &manifest {
+        find_manifest_resource(manifest, target)
+            .cloned()
+            .or_else(|_| find_global_resource(&paths.db_path, target))?
+    } else {
+        find_global_resource(&paths.db_path, target)?
+    };
     if resource.kind != ResourceKind::Source {
         bail!("ctx path only supports source resources");
     }
-    let Some(path) = &resource.local_path else {
+    let Some(path) = resource.local_path else {
         bail!("source resource has no cached path");
     };
     println!("{path}");
@@ -644,18 +693,30 @@ fn use_pointer(cwd: Option<PathBuf>, label: &str, pointer: &str) -> Result<()> {
 fn remove(cwd: Option<PathBuf>, target: &str, prune_cache: bool) -> Result<()> {
     let app = AppContext::load(cwd)?;
     let paths = &app.paths;
-    app.ensure_project()?;
-    let mut manifest = read_manifest(&paths.manifest_path)?;
-    let removed = find_manifest_resource(&manifest, target)?.clone();
-    let before = manifest.resources.len();
-    manifest.resources.retain(|resource| {
-        resource.label != target && resource.url != target && resource.id != target
-    });
-    if manifest.resources.len() == before {
-        bail!("resource not found: {target}");
-    }
-    write_manifest(&paths.manifest_path, &manifest)?;
-    let pruned = if prune_cache {
+    app.ensure_global_storage()?;
+    let mut manifest = read_optional_manifest(paths)?;
+    let mut unlinked_from_project = false;
+    let mut global_only_target = false;
+    let removed = if let Some(manifest) = &mut manifest {
+        if let Ok(resource) = find_manifest_resource(manifest, target).cloned() {
+            let before = manifest.resources.len();
+            manifest.resources.retain(|resource| {
+                resource.label != target && resource.url != target && resource.id != target
+            });
+            unlinked_from_project = manifest.resources.len() != before;
+            write_manifest(&paths.manifest_path, manifest)?;
+            resource
+        } else {
+            global_only_target = true;
+            find_global_resource(&paths.db_path, target)?
+        }
+    } else {
+        global_only_target = true;
+        find_global_resource(&paths.db_path, target)?
+    };
+    let pruned = if global_only_target {
+        remove_global_resource(&paths.db_path, &removed, prune_cache)?
+    } else if prune_cache {
         prune_resource_cache(&paths.db_path, &removed)?
     } else {
         false
@@ -665,6 +726,7 @@ fn remove(cwd: Option<PathBuf>, target: &str, prune_cache: bool) -> Result<()> {
         status: "ok",
         result: json!({
             "target": target,
+            "unlinked_from_current_project": unlinked_from_project,
             "prune_cache_requested": prune_cache,
             "pruned_cache": pruned,
         }),
@@ -695,4 +757,12 @@ fn doctor(cwd: Option<PathBuf>) -> Result<()> {
             "project_resource_count": resource_count,
         }),
     })
+}
+
+fn read_optional_manifest(paths: &crate::models::RuntimePaths) -> Result<Option<Manifest>> {
+    if paths.manifest_path.exists() {
+        Ok(Some(read_manifest(&paths.manifest_path)?))
+    } else {
+        Ok(None)
+    }
 }

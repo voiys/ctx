@@ -2,13 +2,13 @@
 
 ## Product Intent
 
-`ctx` is a Rust CLI that manages project-specific context for coding agents.
+`ctx` is a Rust CLI that manages global and project-specific context for coding agents.
 
 It combines three ideas:
 
 - pinned source repositories that agents can inspect on disk
 - snapshotted docs and notes that can be retrieved as cited context
-- a project manifest that says which resources matter and why
+- an optional project manifest that says which global resources matter here and why
 
 The CLI is agent-first. It does not have a separate human table output mode. Commands should emit structured, compact stdout and keep progress or diagnostics on stderr.
 
@@ -58,7 +58,7 @@ Each project has:
 .ctx/ctx.json
 ```
 
-The manifest records project intent and current pointers. Global cache contents live outside the project.
+The manifest records project intent and current pointers. Global cache contents live outside the project. A manifest is not required to collect, update, show, query, or remove global references.
 
 Manifest entries should include:
 
@@ -105,17 +105,18 @@ Flags:
 
 ### `ctx add <absolute-url>`
 
-Add a resource to the current project and prepare it.
+Add a resource globally and prepare it. If the current directory has `.ctx/ctx.json`, also link the resource into that project manifest.
 
 Behavior:
 
-- GitHub repo URL: resolve, pin, clone/cache, write manifest entry
-- Docs URL: crawl, snapshot, index, write manifest entry
-- Notes file URL: snapshot, index, write manifest entry
+- GitHub repo URL: resolve, pin, clone/cache globally
+- Docs URL: crawl, snapshot, index globally
+- Notes file URL: snapshot, index globally
+- Project manifest present: write or update manifest entry
 
 Flags:
 
-- `--label <name>`: stable project-local name
+- `--label <name>`: stable resource name
 - `--reason <text>`: why this resource belongs to the project
 - `--no-index`: fetch/snapshot only
 - `--max-pages <n>`: maximum docs pages to crawl, default `256`
@@ -124,7 +125,7 @@ Flags:
 
 ### `ctx update <label-or-url>`
 
-Refresh a docs or notes resource. Create a new immutable snapshot if content changed.
+Refresh a docs or notes resource from the project manifest when present, otherwise from global resources. Create a new immutable snapshot if content changed.
 
 For source resources, report the current pin. Changing source refs should be explicit.
 
@@ -146,7 +147,7 @@ Flags:
 
 ### `ctx query "<question>"`
 
-Search current project docs and notes only. Return several cited context blocks.
+Search docs and notes. If a project manifest exists, search that project's linked docs/notes. Otherwise, search global docs/notes. Return several cited context blocks.
 
 Flags:
 
@@ -161,7 +162,7 @@ Retrieval uses code-aware lexical search plus semantic search, fused with recipr
 
 ### `ctx show [label-or-url]`
 
-Show current project state or one resource.
+Show current project state or global state. If a project manifest exists, no-target output shows that project view. Without a manifest, no-target output shows global resources.
 
 Flags:
 
@@ -180,7 +181,7 @@ Flags:
 
 ### `ctx path <label-or-github-url>`
 
-Print the local cache path for a pinned source repository.
+Print the local cache path for a pinned source repository. Resolves through the project manifest when present, otherwise through global resources.
 
 Flags:
 
@@ -202,7 +203,7 @@ Flags:
 
 ### `ctx remove <label-or-url>`
 
-Remove a resource from the project manifest.
+Remove a resource. With a project manifest, this unlinks the resource from the project; `--prune-cache` also deletes the global cache entry. Without a project manifest, this removes the global resource entry; `--prune-cache` also deletes cached files.
 
 Flags:
 

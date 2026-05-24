@@ -1,14 +1,14 @@
 # ctx
 
-`ctx` is a local-first project context manager for coding agents.
+`ctx` is a local-first context manager for coding agents.
 
-It pins the source repositories, documentation snapshots, and notes that matter to a project, then gives agents cited local context on demand.
+It pins source repositories, documentation snapshots, and notes globally, then lets projects opt into a curated `.ctx/ctx.json` view when they need one.
 
 The guiding split is deliberate:
 
 - Source repositories are pinned and cached on disk. Agents explore them with normal code tools such as `rg`, file reads, and callpath tracing.
 - Documentation and notes are snapshotted, indexed, and searched as LLM-ready context blocks.
-- Project state lives in `.ctx/ctx.json`; `ctx init` also upserts a concise usage block into the repository root `AGENTS.md`.
+- Project state is optional. Without `.ctx/ctx.json`, commands use the global cache. With `.ctx/ctx.json`, queries default to that project's linked resources.
 
 ## V1 Shape
 
@@ -52,4 +52,4 @@ That builds the release binary and copies it to `~/.local/bin/ctx`. Make sure `~
 
 ## Status
 
-This repository is a fresh implementation with the v1 core in place: project manifests, GitHub source caching, recursive docs snapshots, notes snapshots, SQLite FTS indexing, local embeddings, RRF hybrid retrieval, global listing, cache pruning, pointer validation, and a local install command.
+This repository is a fresh implementation with the v1 core in place: global resources, optional project manifests, GitHub source caching, recursive docs snapshots, notes snapshots, SQLite FTS indexing, local embeddings, RRF hybrid retrieval, global listing, cache pruning, pointer validation, and a local install command.

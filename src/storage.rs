@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::Result;
+use std::collections::BTreeSet;
+
+use anyhow::{Result, anyhow, bail};
 use rayon::prelude::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
@@ -204,6 +206,64 @@ pub(crate) fn upsert_global_resource(
     Ok(())
 }
 
+pub(crate) fn find_global_resource(db_path: &Path, target: &str) -> Result<Resource> {
+    ensure_db(db_path)?;
+    let conn = Connection::open(db_path)?;
+    let resource = conn
+        .query_row(
+            "SELECT id, label, kind, url, current, local_path, updated_at
+             FROM resources
+             WHERE label = ?1 OR url = ?1 OR id = ?1",
+            params![target],
+            resource_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("resource not found: {target}"))?;
+    Ok(resource)
+}
+
+pub(crate) fn allowed_global_resource_ids(
+    db_path: &Path,
+    label: Option<&str>,
+    kind: Option<ResourceKind>,
+) -> Result<BTreeSet<String>> {
+    ensure_db(db_path)?;
+    let conn = Connection::open(db_path)?;
+    let mut stmt = conn.prepare("SELECT id, label, kind FROM resources")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut out = BTreeSet::new();
+    for row in rows {
+        let (id, resource_label, resource_kind) = row?;
+        let Some(parsed_kind) = parse_kind(&resource_kind) else {
+            continue;
+        };
+        if parsed_kind == ResourceKind::Source {
+            continue;
+        }
+        if let Some(label) = label
+            && resource_label != label
+        {
+            continue;
+        }
+        if let Some(kind) = kind
+            && parsed_kind != kind
+        {
+            continue;
+        }
+        out.insert(id);
+    }
+    if label.is_some() && out.is_empty() {
+        bail!("no queryable docs/notes resource matched label");
+    }
+    Ok(out)
+}
+
 pub(crate) fn list_global_resources(
     db_path: &Path,
     kind: Option<ResourceKind>,
@@ -251,6 +311,31 @@ pub(crate) fn list_global_resources(
             object.insert("size_bytes".to_string(), json!(size));
         }
         out.push(row);
+    }
+    Ok(out)
+}
+
+pub(crate) fn list_global_resource_models(
+    db_path: &Path,
+    kind: Option<ResourceKind>,
+) -> Result<Vec<Resource>> {
+    ensure_db(db_path)?;
+    let conn = Connection::open(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, label, kind, url, current, local_path, updated_at
+         FROM resources
+         ORDER BY kind ASC, label ASC",
+    )?;
+    let rows = stmt.query_map([], resource_from_row)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let resource = row?;
+        if let Some(kind) = kind
+            && resource.kind != kind
+        {
+            continue;
+        }
+        out.push(resource);
     }
     Ok(out)
 }
@@ -324,8 +409,16 @@ pub(crate) fn snapshot_path_for_pointer(
 }
 
 pub(crate) fn prune_resource_cache(db_path: &Path, resource: &Resource) -> Result<bool> {
+    remove_global_resource(db_path, resource, true)
+}
+
+pub(crate) fn remove_global_resource(
+    db_path: &Path,
+    resource: &Resource,
+    prune_files: bool,
+) -> Result<bool> {
     ensure_db(db_path)?;
-    if let Some(path) = &resource.local_path {
+    if prune_files && let Some(path) = &resource.local_path {
         let path = Path::new(path);
         if path.exists() {
             let _ = fs::remove_dir_all(path);
@@ -352,6 +445,33 @@ pub(crate) fn prune_resource_cache(db_path: &Path, resource: &Resource) -> Resul
     )?;
     conn.execute("DELETE FROM resources WHERE id = ?1", params![resource.id])?;
     Ok(true)
+}
+
+fn resource_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Resource> {
+    let kind = parse_kind(&row.get::<_, String>(2)?).ok_or_else(|| {
+        rusqlite::Error::InvalidColumnType(2, "kind".to_string(), rusqlite::types::Type::Text)
+    })?;
+    let updated_at = row.get::<_, String>(6)?;
+    Ok(Resource {
+        id: row.get(0)?,
+        label: row.get(1)?,
+        kind,
+        url: row.get(3)?,
+        reason: None,
+        current: row.get(4)?,
+        local_path: row.get(5)?,
+        created_at: updated_at.clone(),
+        updated_at,
+    })
+}
+
+fn parse_kind(value: &str) -> Option<ResourceKind> {
+    match value {
+        "source" => Some(ResourceKind::Source),
+        "docs" => Some(ResourceKind::Docs),
+        "notes" => Some(ResourceKind::Notes),
+        _ => None,
+    }
 }
 
 fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {

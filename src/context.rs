@@ -38,6 +38,10 @@ impl AppContext {
 
     pub(crate) fn init_storage(&self) -> Result<()> {
         fs::create_dir_all(&self.paths.ctx_dir)?;
+        self.ensure_global_storage()
+    }
+
+    pub(crate) fn ensure_global_storage(&self) -> Result<()> {
         fs::create_dir_all(&self.paths.home)?;
         ensure_db(&self.paths.db_path)
     }

@@ -8,7 +8,7 @@
 - Global cache: `~/.ctx`
 - SQLite index: `~/.ctx/ctx.db`
 
-The manifest is the source of project intent. The cache and index are rebuildable local state.
+The global cache is the source of stored references. A project manifest is an optional linked view that records project intent and current pointers. The index is rebuildable local state.
 
 ## Module Shape
 
@@ -72,8 +72,8 @@ Queries should never silently update a docs snapshot.
 
 Target retrieval flow:
 
-1. Load `.ctx/ctx.json`
-2. Select docs/notes resources
+1. Load `.ctx/ctx.json` when present
+2. Select project docs/notes resources, or global docs/notes resources when no project exists
 3. Generate lexical candidates using code-aware tokens
 4. Generate vector candidates when embeddings exist
 5. Fuse candidates with reciprocal rank fusion

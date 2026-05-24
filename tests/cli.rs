@@ -112,6 +112,121 @@ impl FixtureSite {
 }
 
 #[test]
+fn global_notes_can_be_used_without_project_manifest() {
+    let project = TestProject::new();
+    let note_path = project.root.path().join("global-notes.md");
+    fs::write(
+        &note_path,
+        "Global docs shelf contains CTX_GLOBAL_ONLY_TOKEN for retrieval.",
+    )
+    .unwrap();
+
+    project
+        .ctx()
+        .arg("add")
+        .arg(format!("file://{}", note_path.display()))
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .args(["--label", "global-notes"])
+        .assert()
+        .success();
+    assert!(!project.root.path().join(".ctx/ctx.json").exists());
+
+    let query = project
+        .ctx()
+        .args(["query", "CTX_GLOBAL_ONLY_TOKEN", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let query = String::from_utf8(query).unwrap();
+    assert!(query.contains("scope: global"));
+    assert!(query.contains("CTX_GLOBAL_ONLY_TOKEN"));
+
+    let show = project
+        .ctx()
+        .args(["show", "global-notes", "--snapshots", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let show = String::from_utf8(show).unwrap();
+    assert!(show.contains("global-notes"));
+    assert!(show.contains("snapshot_id"));
+
+    project
+        .ctx()
+        .args(["remove", "global-notes", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let list = project
+        .ctx()
+        .args(["list", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list = String::from_utf8(list).unwrap();
+    assert!(!list.contains("global-notes"));
+}
+
+#[test]
+fn project_add_links_global_resource_when_manifest_exists() {
+    let project = TestProject::new();
+    let note_path = project.root.path().join("project-notes.md");
+    fs::write(
+        &note_path,
+        "Project linked docs mention CTX_PROJECT_LINKED_TOKEN.",
+    )
+    .unwrap();
+
+    project
+        .ctx()
+        .args(["init", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    let add = project
+        .ctx()
+        .arg("add")
+        .arg(format!("file://{}", note_path.display()))
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .args(["--label", "project-notes"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let add = String::from_utf8(add).unwrap();
+    assert!(add.contains("linked_to_current_project: true"));
+
+    let manifest = project.manifest();
+    assert_eq!(manifest["resources"][0]["label"], "project-notes");
+
+    let query = project
+        .ctx()
+        .args(["query", "CTX_PROJECT_LINKED_TOKEN", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let query = String::from_utf8(query).unwrap();
+    assert!(query.contains("scope: project"));
+    assert!(query.contains("CTX_PROJECT_LINKED_TOKEN"));
+}
+
+#[test]
 fn notes_can_be_added_queried_and_debugged() {
     let project = TestProject::new();
     let note_path = project.root.path().join("notes.md");
