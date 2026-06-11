@@ -19,9 +19,13 @@ use crate::manifest::{
     allowed_resource_ids, find_manifest_resource, find_manifest_resource_index, read_manifest,
     upsert_manifest_resource, write_manifest,
 };
+use crate::memory::{
+    RememberInput, ResolvedMemoryScope, forget_memory, list_memories, recall as recall_memories,
+    remember as remember_memory, show_memory,
+};
 use crate::models::{
-    CommandStatus, Defaults, Manifest, QueryKind, ResearchPaperRegistry, ResolvedInput, Resource,
-    ResourceKind, SnapshotMetadata,
+    CommandStatus, Defaults, Manifest, MemoryKind, MemoryScope, MemoryStatus, QueryKind,
+    ResearchPaperRegistry, ResolvedInput, Resource, ResourceKind, SnapshotMetadata,
 };
 use crate::output::print_toon;
 use crate::retrieve::query_index;
@@ -103,6 +107,45 @@ enum Commands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
+    /// Store an explicit operational memory.
+    Remember {
+        content: String,
+        #[arg(long)]
+        kind: MemoryKind,
+        #[arg(long)]
+        subject: String,
+        #[arg(long)]
+        scope: Option<MemoryScope>,
+        #[arg(long)]
+        scope_key: Option<String>,
+        #[arg(long)]
+        trigger: Option<String>,
+        #[arg(long)]
+        suggested: bool,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Search operational memories.
+    Recall {
+        question: String,
+        #[arg(long, default_value_t = DEFAULT_TOP_K)]
+        top_k: usize,
+        #[arg(long)]
+        agent: bool,
+        #[arg(long)]
+        scope: Option<MemoryScope>,
+        #[arg(long)]
+        scope_key: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Inspect or manage stored memories.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommands,
+    },
     /// Show project or resource state.
     Show {
         target: Option<String>,
@@ -169,6 +212,42 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum MemoryCommands {
+    /// List memories visible from the current project.
+    List {
+        #[arg(long)]
+        status: Option<MemoryStatus>,
+        #[arg(long)]
+        scope: Option<MemoryScope>,
+        #[arg(long)]
+        scope_key: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Show one memory with stored sections.
+    Show {
+        id: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// List suggested memories that need review.
+    Review {
+        #[arg(long)]
+        scope: Option<MemoryScope>,
+        #[arg(long)]
+        scope_key: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Dismiss a memory without deleting its record.
+    Forget {
+        id: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -199,6 +278,50 @@ pub fn run() -> Result<()> {
             kind,
             cwd,
         } => query(cwd, &question, top_k, budget, debug, label, kind),
+        Commands::Remember {
+            content,
+            kind,
+            subject,
+            scope,
+            scope_key,
+            trigger,
+            suggested,
+            tags,
+            cwd,
+        } => remember(RememberCommand {
+            cwd,
+            content,
+            kind,
+            subject,
+            scope,
+            scope_key,
+            trigger,
+            suggested,
+            tags,
+        }),
+        Commands::Recall {
+            question,
+            top_k,
+            agent,
+            scope,
+            scope_key,
+            cwd,
+        } => recall(cwd, &question, top_k, agent, scope, scope_key),
+        Commands::Memory { command } => match command {
+            MemoryCommands::List {
+                status,
+                scope,
+                scope_key,
+                cwd,
+            } => memory_list(cwd, status, scope, scope_key),
+            MemoryCommands::Show { id, cwd } => memory_show(cwd, &id),
+            MemoryCommands::Review {
+                scope,
+                scope_key,
+                cwd,
+            } => memory_review(cwd, scope, scope_key),
+            MemoryCommands::Forget { id, cwd } => memory_forget(cwd, &id),
+        },
         Commands::Show {
             target,
             snapshots,
@@ -225,6 +348,200 @@ pub fn run() -> Result<()> {
         Commands::Doctor { cwd } => doctor(cwd),
         Commands::Install { bin_dir, force } => install(bin_dir, force),
     }
+}
+
+struct RememberCommand {
+    cwd: Option<PathBuf>,
+    content: String,
+    kind: MemoryKind,
+    subject: String,
+    scope: Option<MemoryScope>,
+    scope_key: Option<String>,
+    trigger: Option<String>,
+    suggested: bool,
+    tags: Vec<String>,
+}
+
+fn remember(command: RememberCommand) -> Result<()> {
+    let app = AppContext::load(command.cwd)?;
+    app.ensure_global_storage()?;
+    let scope = resolve_memory_scope(
+        &app.paths,
+        command.scope.unwrap_or(MemoryScope::Project),
+        command.scope_key,
+    )?;
+    let status = if command.suggested {
+        MemoryStatus::Suggested
+    } else {
+        MemoryStatus::Active
+    };
+    let result = remember_memory(
+        &app.paths.db_path,
+        RememberInput {
+            kind: command.kind,
+            status,
+            scope,
+            subject: command.subject,
+            trigger: command.trigger,
+            content: command.content,
+            tags: command.tags,
+        },
+    )?;
+    print_toon(CommandStatus {
+        command: "remember",
+        status: "ok",
+        result,
+    })
+}
+
+fn recall(
+    cwd: Option<PathBuf>,
+    question: &str,
+    top_k: usize,
+    agent: bool,
+    scope: Option<MemoryScope>,
+    scope_key: Option<String>,
+) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let scopes = recall_scopes(&app.paths, scope, scope_key)?;
+    let memories = recall_memories(&app.paths.db_path, question, &scopes, top_k, agent)?;
+    print_toon(CommandStatus {
+        command: "recall",
+        status: "ok",
+        result: json!({
+            "question": question,
+            "mode": if agent { "agent" } else { "default" },
+            "top_k": top_k,
+            "scopes": scopes_json(&scopes),
+            "memories": memories,
+        }),
+    })
+}
+
+fn memory_list(
+    cwd: Option<PathBuf>,
+    status: Option<MemoryStatus>,
+    scope: Option<MemoryScope>,
+    scope_key: Option<String>,
+) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let scopes = recall_scopes(&app.paths, scope, scope_key)?;
+    let memories = list_memories(&app.paths.db_path, &scopes, status)?;
+    print_toon(CommandStatus {
+        command: "memory list",
+        status: "ok",
+        result: json!({
+            "scopes": scopes_json(&scopes),
+            "status_filter": status.map(MemoryStatus::as_str),
+            "memories": memories,
+        }),
+    })
+}
+
+fn memory_show(cwd: Option<PathBuf>, id: &str) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let result = show_memory(&app.paths.db_path, id)?;
+    print_toon(CommandStatus {
+        command: "memory show",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_review(
+    cwd: Option<PathBuf>,
+    scope: Option<MemoryScope>,
+    scope_key: Option<String>,
+) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let scopes = recall_scopes(&app.paths, scope, scope_key)?;
+    let memories = list_memories(&app.paths.db_path, &scopes, Some(MemoryStatus::Suggested))?;
+    print_toon(CommandStatus {
+        command: "memory review",
+        status: "ok",
+        result: json!({
+            "scopes": scopes_json(&scopes),
+            "memories": memories,
+        }),
+    })
+}
+
+fn memory_forget(cwd: Option<PathBuf>, id: &str) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let result = forget_memory(&app.paths.db_path, id)?;
+    print_toon(CommandStatus {
+        command: "memory forget",
+        status: "ok",
+        result,
+    })
+}
+
+fn resolve_memory_scope(
+    paths: &crate::models::RuntimePaths,
+    scope: MemoryScope,
+    scope_key: Option<String>,
+) -> Result<ResolvedMemoryScope> {
+    match scope {
+        MemoryScope::Global => {
+            if scope_key.is_some() {
+                bail!("global memories do not accept --scope-key");
+            }
+            Ok(ResolvedMemoryScope {
+                scope,
+                scope_key: None,
+            })
+        }
+        MemoryScope::Project => Ok(ResolvedMemoryScope {
+            scope,
+            scope_key: Some(scope_key.unwrap_or_else(|| paths.project_root.display().to_string())),
+        }),
+        MemoryScope::Thread => {
+            let Some(scope_key) = scope_key else {
+                bail!("thread memories require --scope-key");
+            };
+            Ok(ResolvedMemoryScope {
+                scope,
+                scope_key: Some(scope_key),
+            })
+        }
+    }
+}
+
+fn recall_scopes(
+    paths: &crate::models::RuntimePaths,
+    scope: Option<MemoryScope>,
+    scope_key: Option<String>,
+) -> Result<Vec<ResolvedMemoryScope>> {
+    if let Some(scope) = scope {
+        return resolve_memory_scope(paths, scope, scope_key).map(|scope| vec![scope]);
+    }
+    Ok(vec![
+        ResolvedMemoryScope {
+            scope: MemoryScope::Global,
+            scope_key: None,
+        },
+        ResolvedMemoryScope {
+            scope: MemoryScope::Project,
+            scope_key: Some(paths.project_root.display().to_string()),
+        },
+    ])
+}
+
+fn scopes_json(scopes: &[ResolvedMemoryScope]) -> Vec<serde_json::Value> {
+    scopes
+        .iter()
+        .map(|scope| {
+            json!({
+                "scope": scope.scope.as_str(),
+                "scope_key": scope.scope_key,
+            })
+        })
+        .collect()
 }
 
 fn init(cwd: Option<PathBuf>, write_agents: bool) -> Result<()> {

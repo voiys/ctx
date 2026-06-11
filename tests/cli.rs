@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -62,6 +63,53 @@ impl TestProject {
             .unwrap()
             .to_string()
     }
+}
+
+fn ctx_with_home(home: &Path) -> Command {
+    let mut command = Command::cargo_bin("ctx").unwrap();
+    command.env("CTX_HOME", home);
+    command.env("CTX_EMBEDDINGS", "off");
+    command
+}
+
+fn first_toon_id(stdout: &[u8]) -> String {
+    let stdout = String::from_utf8(stdout.to_vec()).unwrap();
+    stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("id: "))
+        .map(|value| value.trim_matches('"').to_string())
+        .unwrap_or_else(|| panic!("no id line in output:\n{stdout}"))
+}
+
+#[test]
+fn init_writes_agents_block_with_memory_guidance() {
+    let project = TestProject::new();
+
+    project
+        .ctx()
+        .args(["init", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let agents_path = project.root.path().join("AGENTS.md");
+    let agents = fs::read_to_string(&agents_path).unwrap();
+    assert!(agents.contains("Use `ctx` for this project's local context and operational memory."));
+    assert!(agents.contains("ctx recall \"<task, repo, or failure pattern>\" --cwd <repo>"));
+    assert!(agents.contains("ctx remember \"<concise reusable lesson>\""));
+    assert!(agents.contains("--suggested"));
+    assert!(agents.contains("ctx query \"<question>\" --cwd <repo>"));
+
+    project
+        .ctx()
+        .args(["init", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let agents = fs::read_to_string(agents_path).unwrap();
+    assert_eq!(agents.matches("<!-- ctx:start -->").count(), 1);
+    assert_eq!(agents.matches("<!-- ctx:end -->").count(), 1);
 }
 
 struct FixtureSite {
@@ -267,7 +315,7 @@ fn notes_can_be_added_queried_and_debugged() {
     let note_path = project.root.path().join("notes.md");
     fs::write(
         &note_path,
-        "Retries use exponential backoff and jitter. ERR_RETRY_TIMEOUT means the retry budget was exhausted.",
+        "# Retry Notes\n\n## Timeout Recovery\n\nRetries use exponential backoff and jitter. ERR_RETRY_TIMEOUT means the retry budget was exhausted.",
     )
     .unwrap();
 
@@ -306,6 +354,216 @@ fn notes_can_be_added_queried_and_debugged() {
     assert!(stdout.contains("retry-notes"));
     assert!(stdout.contains("ERR_RETRY_TIMEOUT"));
     assert!(stdout.contains("debug:"));
+    assert!(stdout.contains("heading_path[2]:"));
+    assert!(stdout.contains("Timeout Recovery"));
+    assert!(stdout.contains("section_index:"));
+}
+
+#[test]
+fn memories_can_be_remembered_recalled_grouped_and_forgotten() {
+    let project = TestProject::new();
+    let content = r#"# Migration Recipe
+
+## Trigger
+
+ERROR_ALPHA appears during parser migration.
+
+## Step One
+
+Run the focused parser tests.
+
+## Step Two
+
+Update the fixture schema.
+
+## Step Three
+
+Run the smoke validation.
+"#;
+
+    let remember = project
+        .ctx()
+        .arg("remember")
+        .arg(content)
+        .args([
+            "--kind",
+            "recipe",
+            "--subject",
+            "parser.migration",
+            "--scope",
+            "project",
+            "--tag",
+            "parser",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let memory_id = first_toon_id(&remember);
+
+    let recall = project
+        .ctx()
+        .args(["recall", "ERROR_ALPHA smoke", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recall = String::from_utf8(recall).unwrap();
+    assert!(recall.contains("parser.migration"));
+    assert!(recall.contains("ERROR_ALPHA"));
+
+    let agent = project
+        .ctx()
+        .args(["recall", "ERROR_ALPHA smoke", "--agent", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let agent = String::from_utf8(agent).unwrap();
+    assert!(agent.contains("mode: agent"));
+    assert!(agent.contains("context-between"));
+    assert!(agent.contains("Step One"));
+    assert!(agent.contains("Step Two"));
+    assert!(agent.contains("Step Three"));
+
+    project
+        .ctx()
+        .args(["memory", "show", &memory_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    project
+        .ctx()
+        .args(["memory", "forget", &memory_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let recall = project
+        .ctx()
+        .args(["recall", "ERROR_ALPHA smoke", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recall = String::from_utf8(recall).unwrap();
+    assert!(!recall.contains("parser.migration"));
+}
+
+#[test]
+fn project_scoped_recall_excludes_other_projects() {
+    let home = tempfile::tempdir().unwrap();
+    let project_a = tempfile::tempdir().unwrap();
+    let project_b = tempfile::tempdir().unwrap();
+
+    ctx_with_home(home.path())
+        .arg("remember")
+        .arg("Project A memory carries CTX_PROJECT_A_ONLY.")
+        .args([
+            "--kind",
+            "fact",
+            "--subject",
+            "project.scope",
+            "--scope",
+            "project",
+            "--cwd",
+        ])
+        .arg(project_a.path())
+        .assert()
+        .success();
+
+    let from_a = ctx_with_home(home.path())
+        .args(["recall", "CTX_PROJECT_A_ONLY", "--cwd"])
+        .arg(project_a.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let from_a = String::from_utf8(from_a).unwrap();
+    assert!(from_a.contains("CTX_PROJECT_A_ONLY"));
+
+    let from_b = ctx_with_home(home.path())
+        .args(["recall", "CTX_PROJECT_A_ONLY", "--cwd"])
+        .arg(project_b.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let from_b = String::from_utf8(from_b).unwrap();
+    assert!(!from_b.contains("Project A memory carries"));
+}
+
+#[test]
+fn suggested_memories_are_reviewable_but_not_recalled_by_default() {
+    let project = TestProject::new();
+    let remember = project
+        .ctx()
+        .arg("remember")
+        .arg("Suggested memory mentions CTX_SUGGESTED_ONLY.")
+        .args([
+            "--kind",
+            "warning",
+            "--subject",
+            "review.queue",
+            "--suggested",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let memory_id = first_toon_id(&remember);
+
+    let review = project
+        .ctx()
+        .args(["memory", "review", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let review = String::from_utf8(review).unwrap();
+    assert!(review.contains("CTX_SUGGESTED_ONLY"));
+    assert!(review.contains("suggested"));
+
+    let show = project
+        .ctx()
+        .args(["memory", "show", &memory_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let show = String::from_utf8(show).unwrap();
+    assert!(show.contains("sections"));
+
+    let recall = project
+        .ctx()
+        .args(["recall", "CTX_SUGGESTED_ONLY", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recall = String::from_utf8(recall).unwrap();
+    assert!(!recall.contains("Suggested memory mentions"));
 }
 
 #[test]

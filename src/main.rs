@@ -8,6 +8,8 @@ mod embeddings;
 mod input;
 mod install;
 mod manifest;
+mod markdown;
+mod memory;
 mod models;
 mod output;
 mod retrieve;

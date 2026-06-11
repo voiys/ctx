@@ -32,6 +32,66 @@ impl From<QueryKind> for ResourceKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MemoryKind {
+    Preference,
+    Fact,
+    Decision,
+    Recipe,
+    Warning,
+}
+
+impl MemoryKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Preference => "preference",
+            Self::Fact => "fact",
+            Self::Decision => "decision",
+            Self::Recipe => "recipe",
+            Self::Warning => "warning",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MemoryScope {
+    Global,
+    Project,
+    Thread,
+}
+
+impl MemoryScope {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Project => "project",
+            Self::Thread => "thread",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MemoryStatus {
+    Suggested,
+    Active,
+    Dismissed,
+    Superseded,
+}
+
+impl MemoryStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Suggested => "suggested",
+            Self::Active => "active",
+            Self::Dismissed => "dismissed",
+            Self::Superseded => "superseded",
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub(crate) struct Manifest {
     pub(crate) version: u32,
@@ -137,6 +197,15 @@ pub(crate) struct CandidateBase {
     pub(crate) label: String,
     pub(crate) source_url: String,
     pub(crate) chunk_index: i64,
+    pub(crate) section_index: i64,
+    pub(crate) heading_path: Vec<String>,
+    pub(crate) heading_level: i64,
+    pub(crate) parent_section_index: Option<i64>,
+    pub(crate) previous_section_index: Option<i64>,
+    pub(crate) next_section_index: Option<i64>,
+    pub(crate) anchor: Option<String>,
+    pub(crate) plain_text: String,
+    pub(crate) content_hash: String,
     pub(crate) content: String,
 }
 

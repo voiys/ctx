@@ -13,15 +13,22 @@ pub(crate) fn upsert_agents_block(project_root: &Path) -> Result<()> {
         r#"{AGENTS_BLOCK_START}
 ## ctx
 
-Use `ctx` for this project's local context.
+Use `ctx` for this project's local context and operational memory.
 
-- `ctx query "<question>"` searches project docs, research papers, and notes.
-- `ctx query "<question>" --debug` includes ranking details.
+Before non-trivial work, check for prior project lessons:
+
+- `ctx recall "<task, repo, or failure pattern>" --cwd <repo>` recalls scoped memories. Treat results as evidence-backed hints and verify drift-prone facts against the live repo.
+- `ctx remember "<concise reusable lesson>" --kind preference|fact|decision|recipe|warning --subject <stable.topic> --scope project --cwd <repo>` stores confirmed durable lessons. Use `--suggested` for plausible but unconfirmed lessons. Do not store secrets, one-off noise, or unresolved guesses.
+
+Use project context when source, docs, research, or notes evidence is needed:
+
+- `ctx query "<question>" --cwd <repo>` searches project docs, research papers, and notes.
+- `ctx query "<question>" --debug --cwd <repo>` includes ranking and section details.
 - `ctx path <label>` prints the local path for pinned source repos.
 - `ctx show` inspects the project manifest.
 - `ctx list --project` shows linked resources.
 
-Source repos are explored on disk. Docs, research papers, and notes are returned as cited context blocks.
+Source repos are explored on disk. Docs, research papers, and notes are returned as cited context blocks. Memories are recalled separately through `ctx recall`.
 {AGENTS_BLOCK_END}"#
     );
     let updated = if let Some(start) = existing.find(AGENTS_BLOCK_START) {

@@ -9,8 +9,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
 
 use crate::embeddings::{EmbeddingBackend, EmbeddingService};
+use crate::markdown::{MarkdownSection, plain_text, section_markdown};
 use crate::models::{Resource, ResourceKind, SnapshotMetadata, SnapshotPage};
-use crate::util::{kind_str, path_size_bytes};
+use crate::util::{content_hash, kind_str, path_size_bytes};
 
 pub(crate) fn ensure_db(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -56,21 +57,88 @@ pub(crate) fn ensure_db(path: &Path) -> Result<()> {
             snapshot_id UNINDEXED,
             label UNINDEXED
         );
+        CREATE TABLE IF NOT EXISTS memories (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            scope_key TEXT,
+            kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            trigger TEXT,
+            content TEXT NOT NULL,
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            confidence TEXT NOT NULL DEFAULT 'observed',
+            last_used_at TEXT,
+            confirmed_at TEXT,
+            expires_at TEXT,
+            supersedes_id TEXT,
+            embedding BLOB,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE TABLE IF NOT EXISTS memory_sections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            memory_id TEXT NOT NULL,
+            section_index INTEGER NOT NULL,
+            heading_path TEXT NOT NULL DEFAULT '[]',
+            heading_level INTEGER NOT NULL DEFAULT 0,
+            parent_section_index INTEGER,
+            previous_section_index INTEGER,
+            next_section_index INTEGER,
+            anchor TEXT,
+            markdown TEXT NOT NULL,
+            plain_text TEXT NOT NULL DEFAULT '',
+            content_hash TEXT NOT NULL DEFAULT '',
+            embedding BLOB,
+            FOREIGN KEY(memory_id) REFERENCES memories(id)
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+            memory_id UNINDEXED,
+            section_index UNINDEXED,
+            subject,
+            trigger,
+            content,
+            tags
+        );
+        CREATE TABLE IF NOT EXISTS memory_evidence (
+            id TEXT PRIMARY KEY,
+            memory_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id TEXT,
+            uri TEXT,
+            role TEXT NOT NULL,
+            excerpt TEXT,
+            FOREIGN KEY(memory_id) REFERENCES memories(id)
+        );
         ",
     )?;
-    ensure_embedding_column(&conn)?;
+    ensure_chunk_columns(&conn)?;
     Ok(())
 }
 
-fn ensure_embedding_column(conn: &Connection) -> Result<()> {
-    let has_embedding = conn
+fn ensure_chunk_columns(conn: &Connection) -> Result<()> {
+    let columns = conn
         .prepare("PRAGMA table_info(chunks)")?
         .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .iter()
-        .any(|name| name == "embedding");
-    if !has_embedding {
-        conn.execute("ALTER TABLE chunks ADD COLUMN embedding BLOB", [])?;
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let has_column = |name: &str| columns.iter().any(|column| column == name);
+    for (name, definition) in [
+        ("embedding", "embedding BLOB"),
+        ("section_index", "section_index INTEGER NOT NULL DEFAULT 0"),
+        ("heading_path", "heading_path TEXT NOT NULL DEFAULT '[]'"),
+        ("heading_level", "heading_level INTEGER NOT NULL DEFAULT 0"),
+        ("parent_section_index", "parent_section_index INTEGER"),
+        ("previous_section_index", "previous_section_index INTEGER"),
+        ("next_section_index", "next_section_index INTEGER"),
+        ("anchor", "anchor TEXT"),
+        ("plain_text", "plain_text TEXT NOT NULL DEFAULT ''"),
+        ("content_hash", "content_hash TEXT NOT NULL DEFAULT ''"),
+    ] {
+        if !has_column(name) {
+            conn.execute(&format!("ALTER TABLE chunks ADD COLUMN {definition}"), [])?;
+        }
     }
     Ok(())
 }
@@ -114,30 +182,31 @@ fn index_pages(
         .par_iter()
         .enumerate()
         .flat_map(|(page_index, page)| {
-            chunk_text(&page.content, 2_400)
+            page_chunks(resource.kind, page)
                 .into_iter()
-                .enumerate()
-                .map(move |(chunk_index, content)| {
-                    (page_index, chunk_index, page.url.clone(), content)
-                })
+                .map(move |chunk| (page_index, page.url.clone(), chunk))
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    chunks.sort_by_key(|(page_index, chunk_index, _, _)| (*page_index, *chunk_index));
+    chunks.sort_by_key(|(page_index, _, chunk)| (*page_index, chunk.chunk_index));
 
     let contents = chunks
         .iter()
-        .map(|(_, _, _, content)| content.clone())
+        .map(|(_, _, chunk)| chunk.search_content.clone())
         .collect::<Vec<_>>();
     let mut embedding_backend = EmbeddingService::from_env(db_path)?;
     let embeddings = embedding_backend.embed_passages(&contents)?;
 
-    for (global_index, ((_, _, source_url, content), embedding)) in
+    for (global_index, ((_, source_url, chunk), embedding)) in
         chunks.iter().zip(embeddings.iter()).enumerate()
     {
         tx.execute(
-            "INSERT INTO chunks(resource_id, snapshot_id, kind, label, source_url, chunk_index, content, embedding)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO chunks(
+                resource_id, snapshot_id, kind, label, source_url, chunk_index, content, embedding,
+                section_index, heading_path, heading_level, parent_section_index, previous_section_index,
+                next_section_index, anchor, plain_text, content_hash
+             )
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 resource.id,
                 snapshot_id,
@@ -145,19 +214,101 @@ fn index_pages(
                 resource.label,
                 source_url,
                 global_index as i64,
-                content,
-                embedding
+                chunk.content,
+                embedding,
+                chunk.section_index,
+                chunk.heading_path,
+                chunk.heading_level,
+                chunk.parent_section_index,
+                chunk.previous_section_index,
+                chunk.next_section_index,
+                chunk.anchor,
+                chunk.plain_text,
+                chunk.content_hash,
             ],
         )?;
         let rowid = tx.last_insert_rowid();
         tx.execute(
             "INSERT INTO chunks_fts(rowid, content, resource_id, snapshot_id, label)
              VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![rowid, content, resource.id, snapshot_id, resource.label],
+            params![
+                rowid,
+                chunk.search_content,
+                resource.id,
+                snapshot_id,
+                resource.label
+            ],
         )?;
     }
     tx.commit()?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct IndexedChunk {
+    chunk_index: usize,
+    section_index: i64,
+    heading_path: String,
+    heading_level: i64,
+    parent_section_index: Option<i64>,
+    previous_section_index: Option<i64>,
+    next_section_index: Option<i64>,
+    anchor: Option<String>,
+    content: String,
+    plain_text: String,
+    search_content: String,
+    content_hash: String,
+}
+
+fn page_chunks(kind: ResourceKind, page: &SnapshotPage) -> Vec<IndexedChunk> {
+    if kind == ResourceKind::Notes {
+        return section_markdown(&page.content)
+            .into_iter()
+            .map(IndexedChunk::from)
+            .collect();
+    }
+    chunk_text(&page.content, 2_400)
+        .into_iter()
+        .enumerate()
+        .map(|(index, content)| {
+            let plain_text = plain_text(&content);
+            IndexedChunk {
+                chunk_index: index,
+                section_index: 0,
+                heading_path: "[]".to_string(),
+                heading_level: 0,
+                parent_section_index: None,
+                previous_section_index: index.checked_sub(1).map(|value| value as i64),
+                next_section_index: None,
+                anchor: None,
+                search_content: plain_text.clone(),
+                content_hash: content_hash(&content),
+                plain_text,
+                content,
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
+impl From<MarkdownSection> for IndexedChunk {
+    fn from(section: MarkdownSection) -> Self {
+        let heading_path =
+            serde_json::to_string(&section.heading_path).unwrap_or_else(|_| "[]".to_string());
+        Self {
+            chunk_index: section.section_index,
+            section_index: section.section_index as i64,
+            heading_path,
+            heading_level: section.heading_level as i64,
+            parent_section_index: section.parent_section_index.map(|value| value as i64),
+            previous_section_index: section.previous_section_index.map(|value| value as i64),
+            next_section_index: section.next_section_index.map(|value| value as i64),
+            anchor: section.anchor,
+            search_content: section.plain_text.clone(),
+            content: section.markdown,
+            plain_text: section.plain_text,
+            content_hash: section.content_hash,
+        }
+    }
 }
 
 pub(crate) fn upsert_global_resource(

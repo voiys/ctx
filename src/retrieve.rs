@@ -56,6 +56,15 @@ pub(crate) fn query_index(
                 "retrieval": if candidate.vector_rank.is_some() { "rrf_hybrid" } else { "fts5_bm25" },
                 "chunk_id": candidate.base.chunk_id,
                 "chunk_index": candidate.base.chunk_index,
+                "section_index": candidate.base.section_index,
+                "heading_path": candidate.base.heading_path,
+                "heading_level": candidate.base.heading_level,
+                "parent_section_index": candidate.base.parent_section_index,
+                "previous_section_index": candidate.base.previous_section_index,
+                "next_section_index": candidate.base.next_section_index,
+                "anchor": candidate.base.anchor,
+                "plain_text": candidate.base.plain_text,
+                "content_hash": candidate.base.content_hash,
                 "matched_tokens": matched_tokens,
                 "lexical_rank": candidate.lexical_rank,
                 "lexical_score": candidate.lexical_score,
@@ -87,7 +96,9 @@ fn lexical_candidates(
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT c.id, c.resource_id, c.snapshot_id, c.kind, c.label, c.source_url, c.chunk_index,
-                c.content, -bm25(chunks_fts) AS score
+                c.section_index, c.heading_path, c.heading_level, c.parent_section_index,
+                c.previous_section_index, c.next_section_index, c.anchor, c.plain_text,
+                c.content_hash, c.content, -bm25(chunks_fts) AS score
          FROM chunks_fts
          JOIN chunks c ON c.id = chunks_fts.rowid
          WHERE chunks_fts MATCH ?1
@@ -104,9 +115,18 @@ fn lexical_candidates(
                 label: row.get(4)?,
                 source_url: row.get(5)?,
                 chunk_index: row.get(6)?,
-                content: row.get(7)?,
+                section_index: row.get(7)?,
+                heading_path: parse_heading_path(row.get(8)?),
+                heading_level: row.get(9)?,
+                parent_section_index: row.get(10)?,
+                previous_section_index: row.get(11)?,
+                next_section_index: row.get(12)?,
+                anchor: row.get(13)?,
+                plain_text: row.get(14)?,
+                content_hash: row.get(15)?,
+                content: row.get(16)?,
             },
-            row.get::<_, f64>(8)?,
+            row.get::<_, f64>(17)?,
         ))
     })?;
     let mut out = Vec::new();
@@ -127,7 +147,10 @@ fn vector_candidates(
 ) -> Result<Vec<(CandidateBase, f64)>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT id, resource_id, snapshot_id, kind, label, source_url, chunk_index, content, embedding
+        "SELECT id, resource_id, snapshot_id, kind, label, source_url, chunk_index,
+                section_index, heading_path, heading_level, parent_section_index,
+                previous_section_index, next_section_index, anchor, plain_text,
+                content_hash, content, embedding
          FROM chunks
          WHERE embedding IS NOT NULL AND LENGTH(embedding) > 0",
     )?;
@@ -141,9 +164,18 @@ fn vector_candidates(
                 label: row.get(4)?,
                 source_url: row.get(5)?,
                 chunk_index: row.get(6)?,
-                content: row.get(7)?,
+                section_index: row.get(7)?,
+                heading_path: parse_heading_path(row.get(8)?),
+                heading_level: row.get(9)?,
+                parent_section_index: row.get(10)?,
+                previous_section_index: row.get(11)?,
+                next_section_index: row.get(12)?,
+                anchor: row.get(13)?,
+                plain_text: row.get(14)?,
+                content_hash: row.get(15)?,
+                content: row.get(16)?,
             },
-            row.get::<_, Vec<u8>>(8)?,
+            row.get::<_, Vec<u8>>(17)?,
         ))
     })?;
     let mut chunks = Vec::new();
@@ -238,6 +270,10 @@ fn is_llms_txt_source(source_url: &str) -> bool {
         .ends_with("/llms.txt")
 }
 
+fn parse_heading_path(raw: String) -> Vec<String> {
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
 fn tokenize(input: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     input
@@ -283,26 +319,8 @@ mod tests {
 
     #[test]
     fn llms_txt_prior_breaks_close_retrieval_ties() {
-        let ordinary = CandidateBase {
-            chunk_id: 1,
-            resource_id: "docs".to_string(),
-            snapshot_id: "snapshot".to_string(),
-            kind: "docs".to_string(),
-            label: "docs".to_string(),
-            source_url: "https://example.com/docs/page".to_string(),
-            chunk_index: 0,
-            content: "ordinary docs".to_string(),
-        };
-        let llms = CandidateBase {
-            chunk_id: 2,
-            resource_id: "docs".to_string(),
-            snapshot_id: "snapshot".to_string(),
-            kind: "docs".to_string(),
-            label: "docs".to_string(),
-            source_url: "https://example.com/docs/llms.txt".to_string(),
-            chunk_index: 1,
-            content: "llms docs".to_string(),
-        };
+        let ordinary = test_candidate(1, "https://example.com/docs/page", 0, "ordinary docs");
+        let llms = test_candidate(2, "https://example.com/docs/llms.txt", 1, "llms docs");
 
         let fused = fuse_candidates(vec![(ordinary, 1.0), (llms, 0.9)], Vec::new());
 
@@ -312,5 +330,33 @@ mod tests {
         );
         assert_eq!(fused[0].source_prior.as_deref(), Some("llms_txt"));
         assert_eq!(fused[0].source_prior_score, LLMS_TXT_SOURCE_PRIOR_SCORE);
+    }
+
+    fn test_candidate(
+        chunk_id: i64,
+        source_url: &str,
+        chunk_index: i64,
+        content: &str,
+    ) -> CandidateBase {
+        let content = content.to_string();
+        CandidateBase {
+            chunk_id,
+            resource_id: "docs".to_string(),
+            snapshot_id: "snapshot".to_string(),
+            kind: "docs".to_string(),
+            label: "docs".to_string(),
+            source_url: source_url.to_string(),
+            chunk_index,
+            section_index: chunk_index,
+            heading_path: Vec::new(),
+            heading_level: 0,
+            parent_section_index: None,
+            previous_section_index: None,
+            next_section_index: None,
+            anchor: None,
+            plain_text: content.clone(),
+            content_hash: String::new(),
+            content,
+        }
     }
 }
