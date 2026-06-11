@@ -62,7 +62,36 @@ Research paper registries can optionally expose version metadata. arXiv does thi
 
 `file://` URLs may represent notes.
 
-Notes are snapshotted and indexed like docs. Local bare paths are intentionally not accepted by `ctx add`.
+Notes are snapshotted like docs. Local bare paths are intentionally not accepted by `ctx add`.
+
+Notes are controlled Markdown. Indexing splits notes into parser-derived sections and stores heading path, heading level, parent/previous/next section indexes, anchors, Markdown content, plain text, and content hashes. Headings inside fenced code blocks must not create sections.
+
+### Memories
+
+Memories are explicit operational knowledge records stored separately from resource snapshots. They are not crawled resources and are not linked through `.ctx/ctx.json`.
+
+Memory scopes:
+
+- `global`: visible everywhere
+- `project`: keyed by canonical project root
+- `thread`: keyed by an explicit thread id
+
+Memory kinds:
+
+- `preference`
+- `fact`
+- `decision`
+- `recipe`
+- `warning`
+
+Memory statuses:
+
+- `suggested`
+- `active`
+- `dismissed`
+- `superseded`
+
+Default recall searches active global memories plus active memories for the current project. Suggested memories appear in `ctx memory review` but are not recalled by default.
 
 ## Project Manifest
 
@@ -113,6 +142,7 @@ Docs, research papers, and notes snapshots should store enough metadata to make 
 ### `ctx init`
 
 Create `.ctx/ctx.json` and upsert a generated block into root `AGENTS.md`.
+The generated block tells agents to use `ctx recall` before non-trivial work, `ctx remember` for durable confirmed lessons, and `ctx query`/`ctx path` for project evidence.
 
 Flags:
 
@@ -184,6 +214,48 @@ Flags:
 - `--cwd <path>`: project root override
 
 Retrieval uses code-aware lexical search plus semantic search, fused with reciprocal rank fusion. Chunks sourced from `llms.txt` get a small transparent retrieval prior after fusion so curated LLM context can break close ties without overriding stronger matches. Set `CTX_EMBEDDINGS=off` only for tests or constrained environments.
+
+### `ctx remember <content>`
+
+Store an explicit operational memory.
+
+Flags:
+
+- `--kind preference|fact|decision|recipe|warning`: memory kind
+- `--subject <text>`: stable subject or namespace
+- `--scope global|project|thread`: memory scope, default `project`
+- `--scope-key <text>`: explicit key, required for `thread`
+- `--trigger <text>`: optional condition that should surface this memory
+- `--suggested`: store as review-needed instead of active
+- `--tag <tag>`: repeatable tag
+- `--cwd <path>`: project root override
+
+Memory content is stored as Markdown and indexed by section.
+
+### `ctx recall "<question>"`
+
+Search active operational memories.
+
+Flags:
+
+- `--top-k <n>`: memory result count, default `5`
+- `--agent`: return grouped evidence sections for each memory
+- `--scope global|project|thread`: restrict recall to one scope
+- `--scope-key <text>`: explicit key for scoped recall
+- `--cwd <path>`: project root override
+
+Default recall includes global memories and the current project scope.
+
+### `ctx memory`
+
+Inspect or manage memories.
+
+Subcommands:
+
+- `ctx memory list`: list visible memories
+- `ctx memory show <id>`: show one memory and its sections
+- `ctx memory review`: list suggested memories
+- `ctx memory forget <id>`: mark a memory dismissed without deleting it
 
 ### `ctx show [label-or-url]`
 
