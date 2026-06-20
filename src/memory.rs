@@ -574,10 +574,35 @@ pub(crate) fn list_memories(
     Ok(out)
 }
 
-pub(crate) fn show_memory(db_path: &Path, id: &str) -> Result<serde_json::Value> {
+pub(crate) fn export_memories(db_path: &Path) -> Result<Vec<serde_json::Value>> {
+    ensure_db(db_path)?;
+    let conn = Connection::open(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, created_at, updated_at, scope, scope_key, kind, status, subject,
+                trigger, content, tags_json, confidence, last_used_at, confirmed_at,
+                expires_at, supersedes_id, metadata_json
+         FROM memories
+         ORDER BY updated_at DESC",
+    )?;
+    let rows = stmt.query_map([], row_memory)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(memory_json(&row?));
+    }
+    Ok(out)
+}
+
+pub(crate) fn show_memory(
+    db_path: &Path,
+    id: &str,
+    scopes: &[ResolvedMemoryScope],
+) -> Result<serde_json::Value> {
     ensure_db(db_path)?;
     let conn = Connection::open(db_path)?;
     let memory = find_memory(&conn, id)?;
+    if !scope_matches(&memory, scopes) {
+        bail!("memory not found: {id}");
+    }
     let sections = all_sections_for_memory(&conn, id)?;
     Ok(json!({
         "memory": memory_json(&memory),
@@ -585,10 +610,18 @@ pub(crate) fn show_memory(db_path: &Path, id: &str) -> Result<serde_json::Value>
     }))
 }
 
-pub(crate) fn forget_memory(db_path: &Path, id: &str) -> Result<serde_json::Value> {
+pub(crate) fn forget_memory(
+    db_path: &Path,
+    id: &str,
+    scopes: &[ResolvedMemoryScope],
+) -> Result<serde_json::Value> {
     ensure_db(db_path)?;
     let now = timestamp();
     let conn = Connection::open(db_path)?;
+    let memory = find_memory(&conn, id)?;
+    if !scope_matches(&memory, scopes) {
+        bail!("memory not found: {id}");
+    }
     let changed = conn.execute(
         "UPDATE memories SET status = 'dismissed', updated_at = ?1 WHERE id = ?2",
         params![now, id],

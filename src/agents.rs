@@ -2,12 +2,15 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::constants::{AGENTS_BLOCK_END, AGENTS_BLOCK_START};
 
 pub(crate) fn upsert_agents_block(project_root: &Path) -> Result<()> {
     let path = project_root.join("AGENTS.md");
+    if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        bail!("refusing to update symlinked AGENTS.md: {}", path.display());
+    }
     let existing = fs::read_to_string(&path).unwrap_or_default();
     let block = format!(
         r#"{AGENTS_BLOCK_START}

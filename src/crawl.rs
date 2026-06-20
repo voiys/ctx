@@ -1,15 +1,19 @@
 use std::collections::{BTreeSet, HashSet};
+use std::io::Read;
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use rayon::prelude::*;
 use reqwest::StatusCode;
-use reqwest::header::{CONTENT_TYPE, RETRY_AFTER};
+use reqwest::header::{CONTENT_TYPE, HeaderValue, RETRY_AFTER};
 use scraper::{Html, Selector};
 use url::Url;
 
 use crate::models::SnapshotPage;
+
+const MAX_DOC_BODY_BYTES: usize = 5 * 1024 * 1024;
+const MAX_RETRY_AFTER_SECS: u64 = 10;
 
 pub(crate) fn crawl_docs(
     seed: &str,
@@ -115,7 +119,7 @@ fn fetch_doc_page(client: &reqwest::blocking::Client, url: &Url) -> Result<Fetch
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let body = response.text()?;
+    let body = read_capped_body(response, MAX_DOC_BODY_BYTES)?;
     let links = page_links(url, &body);
     let text = if content_type.contains("html") || looks_like_html(&body) {
         html_to_text(&body)
@@ -145,17 +149,29 @@ fn send_with_backoff(
         if attempt == 2 {
             return Ok(response.error_for_status()?);
         }
-        let retry_after = response
-            .headers()
-            .get(RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(delay);
+        let retry_after = capped_retry_after(response.headers().get(RETRY_AFTER), delay);
         thread::sleep(retry_after);
         delay *= 2;
     }
     unreachable!("retry loop returns or errors")
+}
+
+fn capped_retry_after(value: Option<&HeaderValue>, fallback: Duration) -> Duration {
+    value
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(fallback)
+        .min(Duration::from_secs(MAX_RETRY_AFTER_SECS))
+}
+
+fn read_capped_body<R: Read>(reader: R, max_bytes: usize) -> Result<String> {
+    let mut bytes = Vec::new();
+    reader.take(max_bytes as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        bail!("docs page exceeded {max_bytes} byte limit");
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn page_links(base: &Url, body: &str) -> Vec<Url> {
@@ -400,5 +416,23 @@ mod tests {
 
         assert!(links.contains(&"https://example.com/docs/guide.md".to_string()));
         assert!(links.contains(&"https://example.com/docs/api.md".to_string()));
+    }
+
+    #[test]
+    fn retry_after_is_capped() {
+        let value = HeaderValue::from_static("999");
+
+        assert_eq!(
+            capped_retry_after(Some(&value), Duration::from_millis(500)),
+            Duration::from_secs(MAX_RETRY_AFTER_SECS)
+        );
+    }
+
+    #[test]
+    fn capped_body_rejects_oversized_input() {
+        let body = "abcdef";
+
+        assert!(read_capped_body(body.as_bytes(), 5).is_err());
+        assert_eq!(read_capped_body(body.as_bytes(), 6).unwrap(), body);
     }
 }

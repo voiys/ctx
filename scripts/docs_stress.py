@@ -197,6 +197,11 @@ def read_jsonl(path: pathlib.Path) -> list[dict[str, Any]]:
     return rows
 
 
+def safe_label(raw: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in raw)
+    return cleaned.strip(".-") or "target"
+
+
 def dir_size(path: pathlib.Path) -> int:
     total = 0
     if not path.exists():
@@ -284,9 +289,10 @@ def run_target(
     ctx_home: pathlib.Path,
     results_path: pathlib.Path,
 ) -> dict[str, Any]:
-    stdout_path = run_dir / "logs" / f"{index:03d}-{target['label']}.stdout"
-    stderr_path = run_dir / "logs" / f"{index:03d}-{target['label']}.stderr"
-    time_path = run_dir / "logs" / f"{index:03d}-{target['label']}.time"
+    label = safe_label(target["label"])
+    stdout_path = run_dir / "logs" / f"{index:03d}-{label}.stdout"
+    stderr_path = run_dir / "logs" / f"{index:03d}-{label}.stderr"
+    time_path = run_dir / "logs" / f"{index:03d}-{label}.time"
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
 
     command = [
@@ -455,6 +461,9 @@ def cmd_summarize(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    assert safe_label("../../escape") == "escape"
+    assert safe_label("react.docs") == "react.docs"
+
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(required=True)
 

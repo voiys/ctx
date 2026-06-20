@@ -19,7 +19,7 @@ CARGO_RELEASE_ENV := $(if $(CARGO_RELEASE_RUSTFLAGS),RUSTFLAGS="$(CARGO_RELEASE_
 .PHONY: audit bench-retrieval build check install-local lint nextest test unused-deps
 
 build:
-	$(CARGO_RELEASE_ENV) cargo build --release
+	$(CARGO_RELEASE_ENV) cargo build --release --locked
 
 bench-retrieval: build
 	python3 scripts/retrieval_bench.py --mode both --embeddings on
@@ -28,14 +28,14 @@ install-local: build
 	./target/release/ctx install --force
 
 test:
-	cargo test
+	cargo test --locked
 
 nextest:
-	cargo nextest run
+	cargo nextest run --locked
 
 lint:
 	cargo fmt --check
-	cargo clippy --all-targets --all-features -- -D warnings
+	cargo clippy --locked --all-targets --all-features -- -D warnings
 
 audit:
 	cargo deny check

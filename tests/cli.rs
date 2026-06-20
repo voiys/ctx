@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use assert_cmd::Command;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tiny_http::{Response, Server};
 
@@ -82,6 +82,29 @@ fn first_toon_id(stdout: &[u8]) -> String {
 }
 
 #[test]
+fn root_help_puts_agent_quick_start_before_usage() {
+    for args in [Vec::<&str>::new(), vec!["--help"]] {
+        let output = Command::cargo_bin("ctx")
+            .unwrap()
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let stdout = String::from_utf8(output).unwrap();
+        let hint = stdout.find("Agent quick start:").unwrap();
+        let usage = stdout.find("Usage:").unwrap();
+
+        assert!(hint < usage, "{stdout}");
+        assert!(stdout.contains("Read repo AGENTS.md and selected skill docs first"));
+        assert!(stdout.contains("ctx recall \"<task or error>\" --cwd <repo>"));
+        assert!(stdout.contains("Default docs crawl is up to 2048 pages"));
+        assert!(stdout.contains("Do not store secrets."));
+    }
+}
+
+#[test]
 fn init_writes_agents_block_with_memory_guidance() {
     let project = TestProject::new();
 
@@ -110,6 +133,24 @@ fn init_writes_agents_block_with_memory_guidance() {
     let agents = fs::read_to_string(agents_path).unwrap();
     assert_eq!(agents.matches("<!-- ctx:start -->").count(), 1);
     assert_eq!(agents.matches("<!-- ctx:end -->").count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn init_refuses_symlinked_agents_file() {
+    let project = TestProject::new();
+    let outside = project.root.path().join("outside.md");
+    fs::write(&outside, "keep me").unwrap();
+    std::os::unix::fs::symlink(&outside, project.root.path().join("AGENTS.md")).unwrap();
+
+    project
+        .ctx()
+        .args(["init", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .failure();
+
+    assert_eq!(fs::read_to_string(outside).unwrap(), "keep me");
 }
 
 struct FixtureSite {
@@ -461,6 +502,95 @@ Run the smoke validation.
 }
 
 #[test]
+fn personal_export_import_restores_notes_and_memories_with_markers() {
+    let source = TestProject::new();
+    let note_path = source.root.path().join("personal-notes.md");
+    fs::write(
+        &note_path,
+        "# Personal Notes\n\nCTX_PERSONAL_NOTE_TOKEN belongs in restored notes.",
+    )
+    .unwrap();
+
+    source
+        .ctx()
+        .arg("add")
+        .arg(format!("file://{}", note_path.display()))
+        .args(["--label", "personal-notes", "--cwd"])
+        .arg(source.root.path())
+        .assert()
+        .success();
+    source
+        .ctx()
+        .arg("remember")
+        .arg("Project memory carries CTX_PERSONAL_MEMORY_TOKEN.")
+        .args(["--kind", "fact", "--subject", "personal.export", "--cwd"])
+        .arg(source.root.path())
+        .assert()
+        .success();
+
+    let export_path = source.root.path().join("ctx-personal-export.json");
+    source
+        .ctx()
+        .arg("export")
+        .arg(&export_path)
+        .args(["--cwd"])
+        .arg(source.root.path())
+        .assert()
+        .success();
+    let export = fs::read_to_string(&export_path).unwrap();
+    assert!(export.contains("\"kind\": \"ctx_personal_export\""));
+    assert!(export.contains("\"exported_at\""));
+    assert!(export.contains("CTX_PERSONAL_NOTE_TOKEN"));
+    assert!(export.contains("CTX_PERSONAL_MEMORY_TOKEN"));
+
+    let target_home = tempfile::tempdir().unwrap();
+    let target_root = tempfile::tempdir().unwrap();
+    ctx_with_home(target_home.path())
+        .arg("import")
+        .arg(&export_path)
+        .args(["--cwd"])
+        .arg(target_root.path())
+        .assert()
+        .success();
+
+    let recall = ctx_with_home(target_home.path())
+        .args(["recall", "CTX_PERSONAL_MEMORY_TOKEN", "--cwd"])
+        .arg(target_root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recall = String::from_utf8(recall).unwrap();
+    assert!(recall.contains("CTX_PERSONAL_MEMORY_TOKEN"));
+    assert!(recall.contains("Imported from ctx personal export"));
+    assert!(recall.contains("original memory scope: project"));
+
+    let query = ctx_with_home(target_home.path())
+        .args(["query", "CTX_PERSONAL_NOTE_TOKEN", "--cwd"])
+        .arg(target_root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let query = String::from_utf8(query).unwrap();
+    assert!(query.contains("CTX_PERSONAL_NOTE_TOKEN"));
+    assert!(query.contains("ctx-import://notes/"));
+
+    let marker_query = ctx_with_home(target_home.path())
+        .args(["query", "Imported from ctx personal export", "--cwd"])
+        .arg(target_root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let marker_query = String::from_utf8(marker_query).unwrap();
+    assert!(marker_query.contains("Imported from ctx personal export"));
+}
+
+#[test]
 fn project_scoped_recall_excludes_other_projects() {
     let home = tempfile::tempdir().unwrap();
     let project_a = tempfile::tempdir().unwrap();
@@ -503,6 +633,51 @@ fn project_scoped_recall_excludes_other_projects() {
         .clone();
     let from_b = String::from_utf8(from_b).unwrap();
     assert!(!from_b.contains("Project A memory carries"));
+}
+
+#[test]
+fn memory_show_and_forget_require_visible_scope() {
+    let home = tempfile::tempdir().unwrap();
+    let project_a = tempfile::tempdir().unwrap();
+    let project_b = tempfile::tempdir().unwrap();
+
+    let remember = ctx_with_home(home.path())
+        .arg("remember")
+        .arg("Project A direct memory carries CTX_DIRECT_A_ONLY.")
+        .args([
+            "--kind",
+            "fact",
+            "--subject",
+            "project.scope",
+            "--scope",
+            "project",
+            "--cwd",
+        ])
+        .arg(project_a.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let memory_id = first_toon_id(&remember);
+
+    ctx_with_home(home.path())
+        .args(["memory", "show", &memory_id, "--cwd"])
+        .arg(project_b.path())
+        .assert()
+        .failure();
+
+    ctx_with_home(home.path())
+        .args(["memory", "forget", &memory_id, "--cwd"])
+        .arg(project_b.path())
+        .assert()
+        .failure();
+
+    ctx_with_home(home.path())
+        .args(["memory", "show", &memory_id, "--cwd"])
+        .arg(project_a.path())
+        .assert()
+        .success();
 }
 
 #[test]
@@ -862,6 +1037,122 @@ fn use_rejects_missing_snapshot() {
     project
         .ctx()
         .args(["use", "notes", "missing-snapshot", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .failure();
+}
+
+#[test]
+fn manifest_spoofed_paths_do_not_drive_update_sync_or_path() {
+    let project = TestProject::new();
+    let safe_note = project.root.path().join("safe.md");
+    fs::write(&safe_note, "Safe note carries CTX_SAFE_NOTE_ONLY.").unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let secret_note = outside.path().join("secret.md");
+    fs::write(&secret_note, "Secret note carries CTX_SECRET_NOTE_ONLY.").unwrap();
+    let evil_snapshot = outside.path().join("snapshot");
+    fs::create_dir_all(&evil_snapshot).unwrap();
+    fs::write(
+        evil_snapshot.join("pages.json"),
+        r#"[{"url":"file:///evil","content":"Evil snapshot carries CTX_EVIL_SNAPSHOT_ONLY."}]"#,
+    )
+    .unwrap();
+
+    project
+        .ctx()
+        .args(["init", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    project
+        .ctx()
+        .arg("add")
+        .arg(format!("file://{}", safe_note.display()))
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .args(["--label", "notes"])
+        .assert()
+        .success();
+    project
+        .ctx()
+        .args(["link", "notes", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let mut manifest = project.manifest();
+    manifest["resources"][0]["url"] = json!(format!("file://{}", secret_note.display()));
+    manifest["resources"][0]["local_path"] = json!(evil_snapshot.display().to_string());
+    fs::write(
+        project.root.path().join(".ctx/ctx.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    project
+        .ctx()
+        .args(["sync", "--reindex", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let evil_query = project
+        .ctx()
+        .args(["query", "CTX_EVIL_SNAPSHOT_ONLY", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        !String::from_utf8(evil_query)
+            .unwrap()
+            .contains("Evil snapshot carries")
+    );
+
+    project
+        .ctx()
+        .args(["update", "notes", "--force", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let secret_query = project
+        .ctx()
+        .args(["query", "CTX_SECRET_NOTE_ONLY", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        !String::from_utf8(secret_query)
+            .unwrap()
+            .contains("Secret note carries")
+    );
+
+    manifest["resources"][0] = json!({
+        "id": "spoofed-source",
+        "label": "spoofed-source",
+        "kind": "source",
+        "url": "https://github.com/example/repo",
+        "reason": null,
+        "current": "main",
+        "local_path": outside.path().display().to_string(),
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z"
+    });
+    fs::write(
+        project.root.path().join(".ctx/ctx.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    project
+        .ctx()
+        .args(["path", "spoofed-source", "--cwd"])
         .arg(project.root.path())
         .assert()
         .failure();

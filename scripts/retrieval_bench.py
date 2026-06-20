@@ -72,6 +72,13 @@ def html_page(title: str, body: str, links: list[str] | None = None) -> str:
     )
 
 
+def safe_child_path(root: pathlib.Path, raw_path: str) -> pathlib.Path:
+    rel = pathlib.PurePosixPath(raw_path)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise ValueError(f"unsafe doc_path: {raw_path}")
+    return root.joinpath(*rel.parts)
+
+
 def write_mode_corpus(
     root: pathlib.Path,
     cases: list[dict[str, Any]],
@@ -100,7 +107,7 @@ def write_mode_corpus(
             doc_path = case["doc_path"]
             links.append(doc_path)
             llms_lines.append(f"- [{case['id']}]({doc_path}): {case['llms_summary']}")
-            doc_file = library_root / doc_path
+            doc_file = safe_child_path(library_root, doc_path)
             doc_file.parent.mkdir(parents=True, exist_ok=True)
             doc_file.write_text(
                 html_page(
@@ -399,6 +406,14 @@ def run_mode(
 
 
 def main() -> None:
+    assert safe_child_path(pathlib.Path("/tmp/root"), "a/b.html") == pathlib.Path("/tmp/root/a/b.html")
+    try:
+        safe_child_path(pathlib.Path("/tmp/root"), "../escape.html")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unsafe doc_path was accepted")
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--case-file",
