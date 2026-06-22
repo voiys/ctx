@@ -53,12 +53,16 @@ const AGENT_HELP: &str = "Agent quick start:
   Read repo AGENTS.md and selected skill docs first; ctx is supporting evidence.
   ctx recall \"<task or error>\" --cwd <repo>
   ctx query \"<question>\" --cwd <repo>
+  ctx query \"<question>\" --label <docs-label> --cwd <repo>
   ctx remember \"<durable lesson>\" --kind fact --subject <topic> --scope project --cwd <repo>
 
 Gotchas:
   Always pass --cwd for the repo you mean.
   Recall returns hints; verify drift-prone facts against live code.
-  Query searches linked docs, notes, and research; use ctx path plus rg for source.
+  For serious evidence, narrow query with --label and --kind when you know the target.
+  Unscoped/global query is discovery; random lexical overlap can win.
+  Agent evidence is matched chunks plus small local context, not a whole-doc summary.
+  Query searches linked docs, notes, and research; use ctx path plus rg for sources.
   Default docs crawl is up to 2048 pages, not a completeness guarantee.
   Each fetched docs page is capped at 5 MiB; use --max-pages when needed.
   Do not store secrets.";
@@ -148,8 +152,6 @@ enum Commands {
         question: String,
         #[arg(long, default_value_t = DEFAULT_TOP_K)]
         top_k: usize,
-        #[arg(long)]
-        agent: bool,
         #[arg(long)]
         scope: Option<MemoryScope>,
         #[arg(long)]
@@ -318,7 +320,15 @@ pub fn run() -> Result<()> {
             label,
             kind,
             cwd,
-        } => query(cwd, &question, top_k, budget, debug, label, kind),
+        } => query(QueryCommand {
+            cwd,
+            question,
+            top_k,
+            budget_tokens: budget,
+            debug,
+            label,
+            kind,
+        }),
         Commands::Remember {
             content,
             kind,
@@ -343,11 +353,10 @@ pub fn run() -> Result<()> {
         Commands::Recall {
             question,
             top_k,
-            agent,
             scope,
             scope_key,
             cwd,
-        } => recall(cwd, &question, top_k, agent, scope, scope_key),
+        } => recall(cwd, &question, top_k, scope, scope_key),
         Commands::Memory { command } => match command {
             MemoryCommands::List {
                 status,
@@ -412,6 +421,16 @@ struct RememberCommand {
     trigger: Option<String>,
     suggested: bool,
     tags: Vec<String>,
+}
+
+struct QueryCommand {
+    cwd: Option<PathBuf>,
+    question: String,
+    top_k: usize,
+    budget_tokens: usize,
+    debug: bool,
+    label: Option<String>,
+    kind: Option<QueryKind>,
 }
 
 const PERSONAL_EXPORT_KIND: &str = "ctx_personal_export";
@@ -485,20 +504,19 @@ fn recall(
     cwd: Option<PathBuf>,
     question: &str,
     top_k: usize,
-    agent: bool,
     scope: Option<MemoryScope>,
     scope_key: Option<String>,
 ) -> Result<()> {
     let app = AppContext::load(cwd)?;
     app.ensure_global_storage()?;
     let scopes = recall_scopes(&app.paths, scope, scope_key)?;
-    let memories = recall_memories(&app.paths.db_path, question, &scopes, top_k, agent)?;
+    let memories = recall_memories(&app.paths.db_path, question, &scopes, top_k)?;
     print_toon(CommandStatus {
         command: "recall",
         status: "ok",
         result: json!({
             "question": question,
-            "mode": if agent { "agent" } else { "default" },
+            "mode": "agent",
             "top_k": top_k,
             "scopes": scopes_json(&scopes),
             "memories": memories,
@@ -1251,16 +1269,8 @@ fn sync(cwd: Option<PathBuf>, reindex: bool) -> Result<()> {
     })
 }
 
-fn query(
-    cwd: Option<PathBuf>,
-    question: &str,
-    top_k: usize,
-    budget_tokens: usize,
-    debug: bool,
-    label: Option<String>,
-    kind: Option<QueryKind>,
-) -> Result<()> {
-    let app = AppContext::load(cwd)?;
+fn query(command: QueryCommand) -> Result<()> {
+    let app = AppContext::load(command.cwd)?;
     let paths = &app.paths;
     app.ensure_global_storage()?;
     let manifest = read_optional_manifest(paths)?;
@@ -1269,30 +1279,31 @@ fn query(
     } else {
         "global"
     };
-    let query_kind = kind.map(Into::into);
+    let query_kind = command.kind.map(Into::into);
     let allowed = if let Some(manifest) = &manifest {
-        allowed_resource_ids(manifest, label.as_deref(), query_kind)?
+        allowed_resource_ids(manifest, command.label.as_deref(), query_kind)?
     } else {
-        allowed_global_resource_ids(&paths.db_path, label.as_deref(), query_kind)?
+        allowed_global_resource_ids(&paths.db_path, command.label.as_deref(), query_kind)?
     };
     let results = query_index(
         &paths.db_path,
-        question,
+        &command.question,
         &allowed,
-        top_k,
-        budget_tokens,
-        debug,
+        command.top_k,
+        command.budget_tokens,
+        command.debug,
     )?;
     print_toon(CommandStatus {
         command: "query",
         status: "ok",
         result: json!({
-            "question": question,
-            "top_k": top_k,
-            "budget_tokens": budget_tokens,
+            "question": command.question,
+            "top_k": command.top_k,
+            "budget_tokens": command.budget_tokens,
             "project_root": paths.project_root,
             "scope": scope,
-            "debug": debug,
+            "debug": command.debug,
+            "mode": "agent",
             "results": results,
         }),
     })

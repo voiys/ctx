@@ -20,10 +20,10 @@ ctx add https://docs.example.com
 ctx add https://arxiv.org/abs/1706.03762
 ctx link <label>
 ctx query "how do retries work?"
+ctx query "how do retries work?" --label <docs-label>
 ctx query "how do retries work?" --debug
 ctx remember "Run cargo test before claiming parser fixes" --kind preference --subject test.workflow
 ctx recall "parser test workflow"
-ctx recall "parser test workflow" --agent
 ctx memory list
 ctx memory review
 ctx export ctx-personal.json

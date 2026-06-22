@@ -237,7 +237,6 @@ pub(crate) fn recall(
     query: &str,
     scopes: &[ResolvedMemoryScope],
     top_k: usize,
-    agent: bool,
 ) -> Result<Vec<serde_json::Value>> {
     ensure_db(db_path)?;
     if top_k == 0 {
@@ -246,11 +245,7 @@ pub(crate) fn recall(
     let lexical = lexical_candidates(db_path, query, scopes, top_k.max(50) * 10)?;
     let vector = vector_candidates(db_path, query, scopes, top_k.max(50) * 10)?;
     let fused = fuse_candidates(lexical, vector);
-    let results = if agent {
-        grouped_agent_results(db_path, fused, top_k, query)?
-    } else {
-        compact_results(fused, top_k)
-    };
+    let results = grouped_agent_results(db_path, fused, top_k, query)?;
     let memory_ids = results
         .iter()
         .filter_map(|result| {
@@ -392,34 +387,6 @@ fn fuse_candidates(
             .partial_cmp(&a.final_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    out
-}
-
-fn compact_results(candidates: Vec<ScoredMemoryCandidate>, top_k: usize) -> Vec<serde_json::Value> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for candidate in candidates {
-        if !seen.insert(candidate.candidate.memory.id.clone()) {
-            continue;
-        }
-        out.push(json!({
-            "rank": out.len() + 1,
-            "id": candidate.candidate.memory.id,
-            "kind": candidate.candidate.memory.kind,
-            "scope": candidate.candidate.memory.scope,
-            "scope_key": candidate.candidate.memory.scope_key,
-            "status": candidate.candidate.memory.status,
-            "subject": candidate.candidate.memory.subject,
-            "trigger": candidate.candidate.memory.trigger,
-            "content": candidate.candidate.memory.content,
-            "confidence": candidate.candidate.memory.confidence,
-            "score": candidate.final_score,
-            "matched_section": section_json(&candidate.candidate.section, &candidate),
-        }));
-        if out.len() >= top_k {
-            break;
-        }
-    }
     out
 }
 
@@ -791,19 +758,6 @@ fn memory_json(memory: &MemoryRecord) -> serde_json::Value {
         "supersedes_id": memory.supersedes_id,
         "metadata": metadata_from_json(&memory.metadata_json),
     })
-}
-
-fn section_json(
-    section: &MemorySectionRecord,
-    candidate: &ScoredMemoryCandidate,
-) -> serde_json::Value {
-    let mut value = section_json_plain(section);
-    if let Some(object) = value.as_object_mut() {
-        object.insert("score".to_string(), json!(candidate.final_score));
-        object.insert("lexical_rank".to_string(), json!(candidate.lexical_rank));
-        object.insert("vector_rank".to_string(), json!(candidate.vector_rank));
-    }
-    value
 }
 
 fn section_json_plain(section: &MemorySectionRecord) -> serde_json::Value {

@@ -99,6 +99,9 @@ fn root_help_puts_agent_quick_start_before_usage() {
         assert!(hint < usage, "{stdout}");
         assert!(stdout.contains("Read repo AGENTS.md and selected skill docs first"));
         assert!(stdout.contains("ctx recall \"<task or error>\" --cwd <repo>"));
+        assert!(stdout.contains("ctx query \"<question>\" --label <docs-label> --cwd <repo>"));
+        assert!(stdout.contains("Unscoped/global query is discovery"));
+        assert!(stdout.contains("matched chunks plus small local context"));
         assert!(stdout.contains("Default docs crawl is up to 2048 pages"));
         assert!(stdout.contains("Do not store secrets."));
     }
@@ -434,6 +437,100 @@ fn query_can_find_notes_by_resource_label() {
 }
 
 #[test]
+fn agent_query_groups_matches_with_surrounding_evidence() {
+    let project = TestProject::new();
+    let note_path = project.root.path().join("agent-notes.md");
+    fs::write(
+        &note_path,
+        [
+            "# Review Client Job",
+            "",
+            "Use this workflow when a client submits a job.",
+            "",
+            "## Step 1: Open Intake",
+            "",
+            "Open the submitted job intake record.",
+            "",
+            "## Step 2: Review Details",
+            "",
+            "Check compensation gamma details against the client request.",
+            "",
+            "## Step 3: Filler A",
+            "",
+            "Ordinary filler content that should not be returned.",
+            "",
+            "## Step 4: Filler B",
+            "",
+            "Ordinary filler content that should not be returned.",
+            "",
+            "## Step 5: Filler C",
+            "",
+            "Ordinary filler content that should not be returned.",
+            "",
+            "## Step 6: Filler Middle",
+            "",
+            "This distant middle section should stay out of agent evidence.",
+            "",
+            "## Step 7: Filler D",
+            "",
+            "Ordinary filler content that should not be returned.",
+            "",
+            "## Step 8: Filler E",
+            "",
+            "Ordinary filler content that should not be returned.",
+            "",
+            "## Step 9: Filler F",
+            "",
+            "Ordinary filler content that should not be returned.",
+            "",
+            "## Step 10: Final Approval",
+            "",
+            "Record final approval delta before publishing.",
+            "",
+            "## Step 11: Notify Stakeholders",
+            "",
+            "Share the outcome with the client team.",
+            "",
+            "## Step 12: Close Intake",
+            "",
+            "Close the intake task.",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    project
+        .ctx()
+        .arg("add")
+        .arg(format!("file://{}", note_path.display()))
+        .args(["--label", "review-job-notes", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let output = project
+        .ctx()
+        .args(["query", "compensation gamma final approval delta", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.contains("mode: agent"));
+    assert!(stdout.contains("evidence["));
+    assert!(stdout.contains("kind: match"));
+    assert!(stdout.contains("kind: \"context-between\""));
+    assert!(stdout.contains("kind: \"context-before\""));
+    assert!(stdout.contains("kind: \"context-after\""));
+    assert!(stdout.contains("Step 2: Review Details"));
+    assert!(stdout.contains("Step 10: Final Approval"));
+    assert!(!stdout.contains("Step 6: Filler Middle"));
+    assert_eq!(stdout.matches("label: \"review-job-notes\"").count(), 1);
+}
+
+#[test]
 fn memories_can_be_remembered_recalled_grouped_and_forgotten() {
     let project = TestProject::new();
     let content = r#"# Migration Recipe
@@ -493,7 +590,7 @@ Run the smoke validation.
 
     let agent = project
         .ctx()
-        .args(["recall", "ERROR_ALPHA smoke", "--agent", "--cwd"])
+        .args(["recall", "ERROR_ALPHA smoke", "--cwd"])
         .arg(project.root.path())
         .assert()
         .success()
