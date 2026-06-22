@@ -190,15 +190,18 @@ fn index_pages(
         .collect::<Vec<_>>();
     chunks.sort_by_key(|(page_index, _, chunk)| (*page_index, chunk.chunk_index));
 
-    let contents = chunks
+    let search_contents = chunks
         .iter()
-        .map(|(_, _, chunk)| chunk.search_content.clone())
+        .map(|(_, source_url, chunk)| chunk_search_content(resource, source_url, chunk))
         .collect::<Vec<_>>();
     let mut embedding_backend = EmbeddingService::from_env(db_path)?;
-    let embeddings = embedding_backend.embed_passages(&contents)?;
+    let embeddings = embedding_backend.embed_passages(&search_contents)?;
 
-    for (global_index, ((_, source_url, chunk), embedding)) in
-        chunks.iter().zip(embeddings.iter()).enumerate()
+    for (global_index, (((_, source_url, chunk), search_content), embedding)) in chunks
+        .iter()
+        .zip(search_contents.iter())
+        .zip(embeddings.iter())
+        .enumerate()
     {
         tx.execute(
             "INSERT INTO chunks(
@@ -233,7 +236,7 @@ fn index_pages(
              VALUES(?1, ?2, ?3, ?4, ?5)",
             params![
                 rowid,
-                chunk.search_content,
+                search_content,
                 resource.id,
                 snapshot_id,
                 resource.label
@@ -242,6 +245,26 @@ fn index_pages(
     }
     tx.commit()?;
     Ok(())
+}
+
+fn chunk_search_content(resource: &Resource, source_url: &str, chunk: &IndexedChunk) -> String {
+    [
+        resource.label.as_str(),
+        source_url,
+        &heading_path_search_text(&chunk.heading_path),
+        chunk.plain_text.as_str(),
+        chunk.content.as_str(),
+    ]
+    .into_iter()
+    .filter(|part| !part.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+fn heading_path_search_text(heading_path: &str) -> String {
+    serde_json::from_str::<Vec<String>>(heading_path)
+        .unwrap_or_default()
+        .join(" > ")
 }
 
 #[derive(Debug)]
@@ -256,7 +279,6 @@ struct IndexedChunk {
     anchor: Option<String>,
     content: String,
     plain_text: String,
-    search_content: String,
     content_hash: String,
 }
 
@@ -281,7 +303,6 @@ fn page_chunks(kind: ResourceKind, page: &SnapshotPage) -> Vec<IndexedChunk> {
                 previous_section_index: index.checked_sub(1).map(|value| value as i64),
                 next_section_index: None,
                 anchor: None,
-                search_content: plain_text.clone(),
                 content_hash: content_hash(&content),
                 plain_text,
                 content,
@@ -303,7 +324,6 @@ impl From<MarkdownSection> for IndexedChunk {
             previous_section_index: section.previous_section_index.map(|value| value as i64),
             next_section_index: section.next_section_index.map(|value| value as i64),
             anchor: section.anchor,
-            search_content: section.plain_text.clone(),
             content: section.markdown,
             plain_text: section.plain_text,
             content_hash: section.content_hash,

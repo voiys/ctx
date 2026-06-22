@@ -401,6 +401,39 @@ fn notes_can_be_added_queried_and_debugged() {
 }
 
 #[test]
+fn query_can_find_notes_by_resource_label() {
+    let project = TestProject::new();
+    let note_path = project.root.path().join("notes.md");
+    fs::write(
+        &note_path,
+        "# Escalation Runbook\n\nCTX_LABEL_SEARCH_TOKEN is the body marker.",
+    )
+    .unwrap();
+
+    project
+        .ctx()
+        .arg("add")
+        .arg(format!("file://{}", note_path.display()))
+        .args(["--label", "customer-oncall-playbook", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let output = project
+        .ctx()
+        .args(["query", "customer oncall playbook", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.contains("customer-oncall-playbook"));
+    assert!(stdout.contains("CTX_LABEL_SEARCH_TOKEN"));
+}
+
+#[test]
 fn memories_can_be_remembered_recalled_grouped_and_forgotten() {
     let project = TestProject::new();
     let content = r#"# Migration Recipe
