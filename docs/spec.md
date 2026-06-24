@@ -101,7 +101,7 @@ Each project has:
 .ctx/ctx.json
 ```
 
-The manifest records project intent and current pointers. Global cache contents live outside the project. A manifest is not required to collect, update, show, query, or remove global references.
+The manifest records project intent and current pointers. It must not store machine-local cache paths such as `local_path`; global cache contents live outside the project. A manifest is not required to collect, update, show, query, or remove global references.
 
 Manifest entries should include:
 
@@ -193,7 +193,7 @@ Flags:
 
 ### `ctx sync`
 
-Ensure every resource in `.ctx/ctx.json` exists locally and queryable resources are indexed.
+Ensure every resource in `.ctx/ctx.json` exists locally and queryable resources are indexed. Missing GitHub source checkouts can be rebuilt from the manifest URL and current source pin. Docs, research-paper, and notes snapshots are timestamped cache artifacts; `ctx sync` verifies and can reindex them when present, but it does not recreate exact missing snapshots from the manifest alone.
 
 Flags:
 

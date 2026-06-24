@@ -8,7 +8,7 @@
 - Global cache: `~/.ctx`
 - SQLite index: `~/.ctx/ctx.db`
 
-The global cache is the source of stored references. A project manifest is an optional linked view that records project intent and current pointers. `ctx add` mutates global state; `ctx link` and `ctx unlink` mutate project state. The index is rebuildable local state.
+The global cache is the source of stored references. A project manifest is an optional linked view that records project intent and current pointers, without machine-local cache paths. `ctx add` mutates global state; `ctx link` and `ctx unlink` mutate project state. The index is rebuildable local state.
 
 ## Module Shape
 
@@ -65,7 +65,7 @@ Explicit memories are a separate operational corpus. `ctx recall` searches memor
 
 ## Retrieval Snapshots
 
-Docs and research paper registry pages are mutable on the internet, so `ctx` treats each crawl or paper capture as an immutable local snapshot. Notes are snapshotted the same way for consistent citations and rollbacks.
+Docs and research paper registry pages are mutable on the internet, so `ctx` treats each crawl or paper capture as an immutable local snapshot. Notes are snapshotted the same way for consistent citations and rollbacks. Project manifests can point at these snapshots but do not contain enough information to reproduce an exact missing docs, paper, or notes snapshot on another machine.
 
 ```text
 snapshot id = fetched timestamp + content fingerprint

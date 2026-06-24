@@ -9,7 +9,7 @@ The guiding split is deliberate:
 - Source repositories are pinned and cached on disk. Agents explore them with normal code tools such as `rg`, file reads, and callpath tracing.
 - Documentation, notes, and research papers are snapshotted, indexed, and searched as LLM-ready context blocks. Notes are indexed as Markdown sections.
 - Memories are explicit scoped operational knowledge. Use `ctx remember` to write them and `ctx recall` to retrieve them.
-- Project state is optional. Without `.ctx/ctx.json`, commands use the global cache. With `.ctx/ctx.json`, queries default to that project's explicitly linked resources. Use `ctx link` and `ctx unlink` to edit the project view; `ctx add` always stores global references only.
+- Project state is optional. Without `.ctx/ctx.json`, commands use the global cache. With `.ctx/ctx.json`, queries default to that project's explicitly linked resources. Project manifests store portable resource intent and current pointers, not machine-local cache paths. Use `ctx link` and `ctx unlink` to edit the project view; `ctx add` always stores global references only.
 
 ## V1 Shape
 
@@ -50,7 +50,7 @@ All command output is optimized for agent consumption. Human progress and diagno
 - Any other `http` or `https` URL is documentation.
 - `file:///absolute/path` may be used for notes.
 
-Source repositories are pinned to a concrete ref and cached globally. Documentation, research papers, and notes are captured as immutable snapshots with timestamps and content hashes.
+Source repositories are pinned to a concrete ref and cached globally. `ctx sync` can rebuild a missing source checkout from a project manifest's GitHub URL and current pin. Documentation, research papers, and notes are captured as immutable snapshots with timestamps and content hashes; those snapshots are local cache entries, so a manifest alone cannot recreate them exactly on another machine.
 
 Notes are treated as controlled Markdown and indexed by section headings. Crawled docs and research papers keep the existing text chunking path.
 

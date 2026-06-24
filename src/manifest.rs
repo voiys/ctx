@@ -16,10 +16,30 @@ pub(crate) fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let manifest = portable_manifest(manifest);
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_string_pretty(manifest)?)?;
+    fs::write(&tmp, serde_json::to_string_pretty(&manifest)?)?;
     fs::rename(tmp, path)?;
     Ok(())
+}
+
+fn portable_manifest(manifest: &Manifest) -> Manifest {
+    Manifest {
+        version: manifest.version,
+        defaults: crate::models::Defaults {
+            top_k: manifest.defaults.top_k,
+            budget_tokens: manifest.defaults.budget_tokens,
+        },
+        resources: manifest
+            .resources
+            .iter()
+            .cloned()
+            .map(|mut resource| {
+                resource.local_path = None;
+                resource
+            })
+            .collect(),
+    }
 }
 
 pub(crate) fn upsert_manifest_resource(manifest: &mut Manifest, mut resource: Resource) {

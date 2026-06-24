@@ -32,7 +32,7 @@ use crate::models::{
 use crate::output::print_toon;
 use crate::retrieve::query_index;
 use crate::snapshot::{snapshot_docs, snapshot_notes, write_snapshot_pages};
-use crate::source::{cache_github_source, validate_source_pointer};
+use crate::source::{cache_github_source, cache_github_source_pointer, validate_source_pointer};
 use crate::storage::{
     allowed_global_resource_ids, current_content_hash, ensure_db, find_global_resource,
     index_snapshot, list_global_resource_models, list_global_resources, remove_global_resource,
@@ -1210,12 +1210,30 @@ fn sync(cwd: Option<PathBuf>, reindex: bool) -> Result<()> {
 
     for manifest_resource in &manifest.resources {
         let resource = trusted_manifest_resource(&paths.db_path, manifest_resource).ok();
+        let mut rehydrated = false;
+        let mut message = None::<String>;
         let ready = match resource.as_ref() {
-            Some(resource) if resource.kind == ResourceKind::Source => resource
-                .local_path
-                .as_deref()
-                .map(Path::new)
-                .is_some_and(Path::exists),
+            Some(resource) if resource.kind == ResourceKind::Source => {
+                let path_ready = resource
+                    .local_path
+                    .as_deref()
+                    .map(Path::new)
+                    .is_some_and(Path::exists);
+                if path_ready {
+                    true
+                } else {
+                    match rehydrate_source_from_manifest(paths, manifest_resource) {
+                        Ok(_) => {
+                            rehydrated = true;
+                            true
+                        }
+                        Err(error) => {
+                            message = Some(error.to_string());
+                            false
+                        }
+                    }
+                }
+            }
             Some(resource)
                 if matches!(
                     resource.kind,
@@ -1249,12 +1267,36 @@ fn sync(cwd: Option<PathBuf>, reindex: bool) -> Result<()> {
                 }
                 path_ready
             }
+            None if manifest_resource.kind == ResourceKind::Source => {
+                match rehydrate_source_from_manifest(paths, manifest_resource) {
+                    Ok(_) => {
+                        rehydrated = true;
+                        true
+                    }
+                    Err(error) => {
+                        message = Some(error.to_string());
+                        false
+                    }
+                }
+            }
+            None if matches!(
+                manifest_resource.kind,
+                ResourceKind::Docs | ResourceKind::Notes | ResourceKind::ResearchPaper
+            ) =>
+            {
+                message = Some(
+                    "queryable snapshots cannot be rebuilt from a project manifest alone; run ctx add or ctx update on this machine".to_string(),
+                );
+                false
+            }
             _ => false,
         };
         checked.push(json!({
             "label": manifest_resource.label,
             "kind": manifest_resource.kind,
             "ready": ready,
+            "rehydrated": rehydrated,
+            "message": message,
         }));
     }
 
@@ -1267,6 +1309,37 @@ fn sync(cwd: Option<PathBuf>, reindex: bool) -> Result<()> {
             "resources": checked,
         }),
     })
+}
+
+fn rehydrate_source_from_manifest(
+    paths: &crate::models::RuntimePaths,
+    manifest_resource: &Resource,
+) -> Result<Resource> {
+    let ResolvedInput::GithubSource {
+        owner,
+        repo,
+        clone_url,
+        ..
+    } = resolve_input(&manifest_resource.url)?
+    else {
+        bail!(
+            "source manifest URL is not a supported GitHub source: {}",
+            manifest_resource.url
+        );
+    };
+    let (commit, path) = cache_github_source_pointer(
+        &paths.home,
+        &owner,
+        &repo,
+        &manifest_resource.current,
+        &clone_url,
+    )?;
+    let mut resource = manifest_resource.clone();
+    resource.current = commit;
+    resource.local_path = Some(path.display().to_string());
+    resource.updated_at = timestamp();
+    upsert_global_resource(&paths.db_path, &resource, None)?;
+    Ok(resource)
 }
 
 fn query(command: QueryCommand) -> Result<()> {

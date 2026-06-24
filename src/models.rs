@@ -122,6 +122,7 @@ pub(crate) struct Resource {
     pub(crate) url: String,
     pub(crate) reason: Option<String>,
     pub(crate) current: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) local_path: Option<String>,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,

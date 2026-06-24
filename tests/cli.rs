@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::process::Command as StdCommand;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -53,16 +54,147 @@ impl TestProject {
     }
 
     fn resource_path(&self, label: &str) -> String {
-        self.manifest()["resources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|resource| resource["label"] == label)
-            .unwrap()["local_path"]
-            .as_str()
-            .unwrap()
-            .to_string()
+        let output = self
+            .ctx()
+            .args(["list", "--cwd"])
+            .arg(self.root.path())
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let output = String::from_utf8(output).unwrap();
+        let mut in_resource = false;
+        let mut label_index = None;
+        let mut local_path_index = None;
+        for line in output.lines() {
+            let line = line.trim();
+            if line.starts_with("resources[")
+                && let Some(start) = line.find('{')
+                && let Some(end) = line[start + 1..].find('}')
+            {
+                let columns = line[start + 1..start + 1 + end]
+                    .split(',')
+                    .collect::<Vec<_>>();
+                label_index = columns.iter().position(|column| *column == "label");
+                local_path_index = columns.iter().position(|column| *column == "local_path");
+                continue;
+            }
+            if let (Some(label_index), Some(local_path_index)) = (label_index, local_path_index) {
+                let fields = split_toon_row(line);
+                if fields.get(label_index).is_some_and(|value| value == label)
+                    && let Some(value) = fields.get(local_path_index)
+                {
+                    return value.to_string();
+                }
+            }
+            if let Some(value) = line.strip_prefix("label: ") {
+                in_resource = value.trim_matches('"') == label;
+            }
+            if in_resource && let Some(value) = line.strip_prefix("local_path: ") {
+                return value.trim_matches('"').to_string();
+            }
+        }
+        panic!("no local_path for {label} in ctx list output:\n{output}");
     }
+
+    fn assert_manifest_has_no_local_paths(&self) {
+        for resource in self.manifest()["resources"].as_array().unwrap() {
+            assert!(
+                resource.get("local_path").is_none(),
+                "manifest leaked local_path: {resource}"
+            );
+        }
+    }
+
+    fn ctx_with_git_config(&self, git_config: &Path) -> Command {
+        let mut command = self.ctx();
+        command.env("GIT_CONFIG_GLOBAL", git_config);
+        command.env("GIT_CONFIG_NOSYSTEM", "1");
+        command.env("GIT_ALLOW_PROTOCOL", "file");
+        command
+    }
+}
+
+fn split_toon_row(row: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in row.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                fields.push(current.trim().trim_matches('"').to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    fields.push(current.trim().trim_matches('"').to_string());
+    fields
+}
+
+struct GitFixture {
+    _remote: TempDir,
+    git_config: std::path::PathBuf,
+    commit: String,
+}
+
+impl GitFixture {
+    fn new(project_root: &Path) -> Self {
+        let work = tempfile::tempdir().unwrap();
+        run_git(work.path(), &["init"]);
+        run_git(work.path(), &["config", "user.email", "ctx@example.com"]);
+        run_git(work.path(), &["config", "user.name", "ctx test"]);
+        run_git(work.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(work.path().join("README.md"), "fixture source\n").unwrap();
+        run_git(work.path(), &["add", "README.md"]);
+        run_git(work.path(), &["commit", "-m", "initial source"]);
+        let commit = run_git(work.path(), &["rev-parse", "HEAD"]);
+
+        let remote = tempfile::tempdir().unwrap();
+        let bare_path = remote.path().join("source.git");
+        run_git(
+            work.path(),
+            &[
+                "clone",
+                "--bare",
+                work.path().to_str().unwrap(),
+                bare_path.to_str().unwrap(),
+            ],
+        );
+
+        let git_config = project_root.join("gitconfig");
+        fs::write(
+            &git_config,
+            format!(
+                "[url \"file://{}\"]\n\tinsteadOf = https://github.com/fixture/source.git\n",
+                bare_path.display()
+            ),
+        )
+        .unwrap();
+
+        Self {
+            _remote: remote,
+            git_config,
+            commit,
+        }
+    }
+}
+
+fn run_git(cwd: &Path, args: &[&str]) -> String {
+    let output = StdCommand::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run git {args:?}: {error}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
 fn ctx_with_home(home: &Path) -> Command {
@@ -318,6 +450,7 @@ fn project_link_adds_existing_global_resource_to_manifest() {
     let manifest = project.manifest();
     assert_eq!(manifest["resources"][0]["label"], "project-notes");
     assert_eq!(manifest["resources"][0]["reason"], "needed for tests");
+    project.assert_manifest_has_no_local_paths();
 
     let query = project
         .ctx()
@@ -1115,6 +1248,7 @@ fn update_keeps_pointer_on_noop_and_moves_on_content_change() {
         .assert()
         .success();
     let first = project.resource_current("fixture-docs");
+    project.assert_manifest_has_no_local_paths();
 
     project
         .ctx()
@@ -1135,6 +1269,7 @@ fn update_keeps_pointer_on_noop_and_moves_on_content_change() {
         .assert()
         .success();
     assert_ne!(project.resource_current("fixture-docs"), first);
+    project.assert_manifest_has_no_local_paths();
 }
 
 #[test]
@@ -1170,6 +1305,58 @@ fn use_rejects_missing_snapshot() {
         .arg(project.root.path())
         .assert()
         .failure();
+}
+
+#[test]
+fn legacy_manifest_local_path_is_stripped_on_next_write() {
+    let project = TestProject::new();
+    let note_path = project.root.path().join("notes.md");
+    fs::write(&note_path, "A note about portable manifests.").unwrap();
+    project
+        .ctx()
+        .args(["init", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    project
+        .ctx()
+        .arg("add")
+        .arg(format!("file://{}", note_path.display()))
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .args(["--label", "notes"])
+        .assert()
+        .success();
+    project
+        .ctx()
+        .args(["link", "notes", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    project.assert_manifest_has_no_local_paths();
+
+    let mut manifest = project.manifest();
+    manifest["resources"][0]["local_path"] = json!("/tmp/machine-local-cache-path");
+    fs::write(
+        project.root.path().join(".ctx/ctx.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        project.manifest()["resources"][0]
+            .get("local_path")
+            .is_some()
+    );
+
+    let current = project.resource_current("notes");
+    project
+        .ctx()
+        .args(["use", "notes", &current, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    assert_eq!(project.resource_current("notes"), current);
+    project.assert_manifest_has_no_local_paths();
 }
 
 #[test]
@@ -1351,6 +1538,91 @@ fn install_copies_binary_to_requested_bin_dir() {
         .assert()
         .success();
     assert!(bin_dir.join("ctx").exists());
+}
+
+#[test]
+fn sync_rehydrates_missing_source_checkout_from_manifest() {
+    let project = TestProject::new();
+    let fixture = GitFixture::new(project.root.path());
+    project
+        .ctx()
+        .args(["init", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    project
+        .ctx_with_git_config(&fixture.git_config)
+        .arg("add")
+        .arg("https://github.com/fixture/source")
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .args(["--label", "fixture-source"])
+        .assert()
+        .success();
+    project
+        .ctx()
+        .args(["link", "fixture-source", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    project.assert_manifest_has_no_local_paths();
+    assert_eq!(project.resource_current("fixture-source"), fixture.commit);
+
+    let output = project
+        .ctx()
+        .args(["path", "fixture-source", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_path = String::from_utf8(output).unwrap().trim().to_string();
+    assert!(std::path::Path::new(&first_path).join(".git").exists());
+
+    project
+        .ctx()
+        .args(["remove", "fixture-source", "--prune-cache", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    assert!(!std::path::Path::new(&first_path).exists());
+    project
+        .ctx()
+        .args(["path", "fixture-source", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .failure();
+
+    let sync = project
+        .ctx_with_git_config(&fixture.git_config)
+        .args(["sync", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let sync = String::from_utf8(sync).unwrap();
+    assert!(
+        sync.contains("resources[1]{label,kind,ready,rehydrated,message}")
+            && sync.contains("\"fixture-source\",source,true,true"),
+        "{sync}"
+    );
+
+    let output = project
+        .ctx()
+        .args(["path", "fixture-source", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second_path = String::from_utf8(output).unwrap().trim().to_string();
+    assert!(std::path::Path::new(&second_path).join(".git").exists());
+    assert_eq!(project.resource_current("fixture-source"), fixture.commit);
+    project.assert_manifest_has_no_local_paths();
 }
 
 #[test]
