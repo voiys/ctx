@@ -39,6 +39,7 @@ use crate::models::{
     CommandStatus, Defaults, Manifest, MemoryKind, MemoryScope, MemoryStatus, QueryKind,
     ResearchPaperRegistry, ResolvedInput, Resource, ResourceKind, SnapshotMetadata, SnapshotPage,
 };
+use crate::offload::{OffloadNodeInput, create_offload_node, offload_graph, show_offload_node};
 use crate::output::print_toon;
 use crate::retrieve::query_index;
 use crate::snapshot::{snapshot_docs, snapshot_notes, write_snapshot_pages};
@@ -178,6 +179,11 @@ enum Commands {
     Hook {
         #[command(subcommand)]
         command: HookCommands,
+    },
+    /// Store and inspect offloaded payload nodes.
+    Offload {
+        #[command(subcommand)]
+        command: OffloadCommands,
     },
     /// Export personal memories and notes.
     Export {
@@ -433,6 +439,40 @@ enum HookCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum OffloadCommands {
+    /// Add an offload node, optionally storing file content as a blob.
+    Add {
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        summary: Option<String>,
+        #[arg(long)]
+        content_file: Option<PathBuf>,
+        #[arg(long)]
+        media_type: Option<String>,
+        #[arg(long)]
+        parent: Option<String>,
+        #[arg(long)]
+        edge_kind: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Show one offload node.
+    Show {
+        id: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Render the project offload graph as Mermaid.
+    Graph {
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+}
+
 pub fn run() -> Result<()> {
     let mut args = env::args_os();
     let _program = args.next();
@@ -578,6 +618,29 @@ pub fn run() -> Result<()> {
                 cwd,
             } => hook_recall(cwd, &question, top_k, budget),
         },
+        Commands::Offload { command } => match command {
+            OffloadCommands::Add {
+                kind,
+                title,
+                summary,
+                content_file,
+                media_type,
+                parent,
+                edge_kind,
+                cwd,
+            } => offload_add(OffloadAddCommand {
+                cwd,
+                kind,
+                title,
+                summary,
+                content_file,
+                media_type,
+                parent,
+                edge_kind,
+            }),
+            OffloadCommands::Show { id, cwd } => offload_show(cwd, &id),
+            OffloadCommands::Graph { cwd } => offload_graph_command(cwd),
+        },
         Commands::Export { path, cwd } => export_personal(cwd, &path),
         Commands::Import { path, cwd } => import_personal(cwd, &path),
         Commands::Show {
@@ -637,6 +700,17 @@ struct QueryCommand {
     debug: bool,
     label: Option<String>,
     kind: Option<QueryKind>,
+}
+
+struct OffloadAddCommand {
+    cwd: Option<PathBuf>,
+    kind: String,
+    title: String,
+    summary: Option<String>,
+    content_file: Option<PathBuf>,
+    media_type: Option<String>,
+    parent: Option<String>,
+    edge_kind: Option<String>,
 }
 
 const PERSONAL_EXPORT_KIND: &str = "ctx_personal_export";
@@ -1188,6 +1262,67 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     let mut out = value.chars().take(keep).collect::<String>();
     out.push_str("...");
     out
+}
+
+fn offload_add(command: OffloadAddCommand) -> Result<()> {
+    let app = AppContext::load(command.cwd)?;
+    app.ensure_global_storage()?;
+    let content = command
+        .content_file
+        .as_ref()
+        .map(|path| {
+            fs::read_to_string(path)
+                .with_context(|| format!("failed to read offload content {}", path.display()))
+        })
+        .transpose()?;
+    let result = create_offload_node(
+        &app.paths.db_path,
+        &app.paths.home,
+        OffloadNodeInput {
+            project_root: app.paths.project_root.display().to_string(),
+            kind: command.kind,
+            title: command.title,
+            summary: command.summary,
+            content,
+            media_type: command.media_type,
+            parent_node_id: command.parent,
+            edge_kind: command.edge_kind,
+        },
+    )?;
+    print_toon(CommandStatus {
+        command: "offload add",
+        status: "ok",
+        result,
+    })
+}
+
+fn offload_show(cwd: Option<PathBuf>, id: &str) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let result = show_offload_node(
+        &app.paths.db_path,
+        &app.paths.project_root.display().to_string(),
+        id,
+    )?;
+    print_toon(CommandStatus {
+        command: "offload show",
+        status: "ok",
+        result,
+    })
+}
+
+fn offload_graph_command(cwd: Option<PathBuf>) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let result = offload_graph(
+        &app.paths.db_path,
+        &app.paths.project_root.display().to_string(),
+    )?;
+    print_toon(CommandStatus {
+        command: "offload graph",
+        status: "ok",
+        result,
+    })
 }
 
 fn export_personal(cwd: Option<PathBuf>, path: &Path) -> Result<()> {

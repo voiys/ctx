@@ -162,6 +162,7 @@ ctx memory brief "<task>" --cwd <repo>
 ctx hook recall "<task or latest user turn>" --cwd <repo>
 
 ctx event show <node-id-or-event-id> --cwd <repo>
+ctx offload add --kind tool_result --title "..." --content-file <path> --cwd <repo>
 ctx offload graph --cwd <repo>
 ctx offload show <node-id> --cwd <repo>
 ```

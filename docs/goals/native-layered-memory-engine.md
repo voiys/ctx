@@ -107,10 +107,12 @@ make check
   - Validate profile provenance, budget behavior, and no override of live repo
     evidence.
   - Implemented `ctx memory l3 enqueue` from active L2 scene briefs.
-- [ ] C06: Offload and Mermaid
+- [x] C06: Offload and Mermaid
   - Add offload node/blob storage, graph rendering, drill-down commands, and
     compact active task graph injection.
   - Validate large payload storage, node lookup, and Mermaid output.
+  - Implemented `ctx offload add`, `ctx offload show`, and
+    `ctx offload graph`.
 - [ ] C07: Hook installers and generated agent guidance
   - Add Codex and Claude Code hook installer/doctor commands.
   - Update generated `AGENTS.md` block with memory-job/offload instructions.

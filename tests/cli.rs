@@ -1701,6 +1701,99 @@ fn l3_enqueue_and_apply_creates_profile_revision() {
 }
 
 #[test]
+fn offload_add_show_and_graph_render_mermaid() {
+    let project = TestProject::new();
+    let payload_path = project.root.path().join("runner-log.txt");
+    fs::write(
+        &payload_path,
+        "Very large runner log with CTX_OFFLOAD_PAYLOAD_TOKEN and retained details.",
+    )
+    .unwrap();
+
+    let created = project
+        .ctx()
+        .args([
+            "offload",
+            "add",
+            "--kind",
+            "tool_result",
+            "--title",
+            "Runner log",
+            "--summary",
+            "Retained CI runner log",
+            "--content-file",
+        ])
+        .arg(&payload_path)
+        .args(["--media-type", "text/plain", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let node_id = first_toon_id(&created);
+    let created = String::from_utf8(created).unwrap();
+    assert!(created.contains("content_hash"));
+    assert!(created.contains("size_bytes"));
+
+    let shown = project
+        .ctx()
+        .args(["offload", "show", &node_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let shown = String::from_utf8(shown).unwrap();
+    assert!(shown.contains("Runner log"));
+    assert!(shown.contains("Retained CI runner log"));
+    assert!(shown.contains("text/plain"));
+
+    project
+        .ctx()
+        .args([
+            "offload",
+            "add",
+            "--kind",
+            "summary",
+            "--title",
+            "Follow-up summary",
+            "--summary",
+            "Compressed child node",
+            "--parent",
+            &node_id,
+            "--edge-kind",
+            "summarizes",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let graph = project
+        .ctx()
+        .args(["offload", "graph", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let graph = String::from_utf8(graph).unwrap();
+    assert!(graph.contains("flowchart TD"));
+    assert!(graph.contains("Runner log"));
+    assert!(graph.contains("Follow-up summary"));
+    assert!(graph.contains("summarizes"));
+
+    let conn = Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let blob_path: String = conn
+        .query_row("SELECT path FROM payload_blobs", [], |row| row.get(0))
+        .unwrap();
+    assert!(Path::new(&blob_path).exists());
+}
+
+#[test]
 fn docs_crawl_recursively_indexes_linked_pages() {
     let site = FixtureSite::new(HashMap::from([
         (

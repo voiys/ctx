@@ -16,6 +16,7 @@ mod manifest;
 mod markdown;
 mod memory;
 mod models;
+mod offload;
 mod output;
 mod retrieve;
 #[allow(dead_code)]

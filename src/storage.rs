@@ -211,6 +211,7 @@ pub(crate) fn ensure_db(path: &Path) -> Result<()> {
             id TEXT PRIMARY KEY,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            project_root TEXT,
             session_id TEXT,
             event_id TEXT,
             kind TEXT NOT NULL,
@@ -222,6 +223,8 @@ pub(crate) fn ensure_db(path: &Path) -> Result<()> {
             FOREIGN KEY(event_id) REFERENCES hook_events(id),
             FOREIGN KEY(blob_id) REFERENCES payload_blobs(id)
         );
+        CREATE INDEX IF NOT EXISTS idx_offload_nodes_project_created
+            ON offload_nodes(project_root, created_at);
         CREATE TABLE IF NOT EXISTS offload_edges (
             id TEXT PRIMARY KEY,
             created_at TEXT NOT NULL,
@@ -256,6 +259,7 @@ pub(crate) fn ensure_db(path: &Path) -> Result<()> {
         ",
     )?;
     ensure_chunk_columns(&conn)?;
+    ensure_offload_columns(&conn)?;
     Ok(())
 }
 
@@ -280,6 +284,17 @@ fn ensure_chunk_columns(conn: &Connection) -> Result<()> {
         if !has_column(name) {
             conn.execute(&format!("ALTER TABLE chunks ADD COLUMN {definition}"), [])?;
         }
+    }
+    Ok(())
+}
+
+fn ensure_offload_columns(conn: &Connection) -> Result<()> {
+    let columns = conn
+        .prepare("PRAGMA table_info(offload_nodes)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == "project_root") {
+        conn.execute("ALTER TABLE offload_nodes ADD COLUMN project_root TEXT", [])?;
     }
     Ok(())
 }
