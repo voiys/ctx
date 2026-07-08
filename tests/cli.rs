@@ -1488,6 +1488,98 @@ fn l1_enqueue_and_apply_stores_review_gated_deduped_memory() {
 }
 
 #[test]
+fn l2_enqueue_and_apply_materializes_scene_brief() {
+    let project = TestProject::new();
+
+    let memory = project
+        .ctx()
+        .arg("remember")
+        .arg("For deployment reviews, run make check before handing off.")
+        .args([
+            "--kind",
+            "recipe",
+            "--subject",
+            "deployment.review",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let memory_id = first_toon_id(&memory);
+
+    let enqueue = project
+        .ctx()
+        .args(["memory", "l2", "enqueue", "--limit", "10", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let job_id = first_toon_id(&enqueue);
+    let enqueue = String::from_utf8(enqueue).unwrap();
+    assert!(enqueue.contains("kind: l2_scene"));
+    assert!(enqueue.contains("evidence_count: 1"));
+
+    let prompt = project
+        .ctx()
+        .args(["memory", "job", "prompt", &job_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prompt = String::from_utf8(prompt).unwrap();
+    assert!(prompt.contains("Group related accepted L1 memories"));
+    assert!(prompt.contains(&memory_id));
+
+    let result_path = project.root.path().join("l2-result.json");
+    let l2_result = json!({
+        "scenes": [{
+            "action": "create",
+            "scene_name": "Deployment Review",
+            "summary": "Deployment handoffs require make check.",
+            "heat": 0.8,
+            "body_markdown": "## Deployment Review\n\nRun `make check` before handoff.",
+            "source_memory_ids": [memory_id],
+        }]
+    });
+    fs::write(&result_path, serde_json::to_string(&l2_result).unwrap()).unwrap();
+
+    let applied = project
+        .ctx()
+        .args(["memory", "job", "apply", &job_id])
+        .arg(&result_path)
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let applied = String::from_utf8(applied).unwrap();
+    assert!(applied.contains("materialized_count: 1"));
+    assert!(applied.contains("Deployment Review"));
+
+    let conn = Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let row: (String, String, String, String) = conn
+        .query_row(
+            "SELECT scene_name, summary, status, source_memory_ids_json FROM scene_briefs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(row.0, "Deployment Review");
+    assert_eq!(row.1, "Deployment handoffs require make check.");
+    assert_eq!(row.2, "active");
+    assert!(row.3.contains(&memory_id));
+}
+
+#[test]
 fn docs_crawl_recursively_indexes_linked_pages() {
     let site = FixtureSite::new(HashMap::from([
         (

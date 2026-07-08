@@ -10,6 +10,7 @@ mod install;
 mod jobs;
 mod journal;
 mod l1;
+mod l2;
 mod manifest;
 mod markdown;
 mod memory;

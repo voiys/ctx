@@ -112,6 +112,21 @@ pub(crate) fn ensure_db(path: &Path) -> Result<()> {
             excerpt TEXT,
             FOREIGN KEY(memory_id) REFERENCES memories(id)
         );
+        CREATE TABLE IF NOT EXISTS scene_briefs (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            project_root TEXT NOT NULL,
+            scene_name TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            heat REAL NOT NULL DEFAULT 0,
+            body_markdown TEXT NOT NULL,
+            source_memory_ids_json TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL DEFAULT 'active',
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_scene_briefs_project_status
+            ON scene_briefs(project_root, status, updated_at);
         CREATE TABLE IF NOT EXISTS agent_sessions (
             id TEXT PRIMARY KEY,
             created_at TEXT NOT NULL,

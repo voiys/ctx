@@ -24,6 +24,7 @@ use crate::jobs::{
 };
 use crate::journal::{HookEventInput, ingest_hook_event};
 use crate::l1::{L1_EXTRACT_JOB_KIND, l1_extract_result_schema, recent_l0_evidence};
+use crate::l2::{L2_SCENE_JOB_KIND, l2_scene_result_schema, recent_l1_memory_evidence};
 use crate::manifest::{
     allowed_resource_ids, find_manifest_resource, find_manifest_resource_index, read_manifest,
     upsert_manifest_resource, write_manifest,
@@ -318,6 +319,11 @@ enum MemoryCommands {
         #[command(subcommand)]
         command: MemoryL1Commands,
     },
+    /// Queue L2 scene brief updates from accepted L1 memories.
+    L2 {
+        #[command(subcommand)]
+        command: MemoryL2Commands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -367,6 +373,17 @@ enum MemoryL1Commands {
         limit: usize,
         #[arg(long)]
         session_id: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryL2Commands {
+    /// Queue an L2 scene brief job from active L1 memories.
+    Enqueue {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
@@ -521,6 +538,9 @@ pub fn run() -> Result<()> {
                     session_id,
                     cwd,
                 } => memory_l1_enqueue(cwd, limit, session_id),
+            },
+            MemoryCommands::L2 { command } => match command {
+                MemoryL2Commands::Enqueue { limit, cwd } => memory_l2_enqueue(cwd, limit),
             },
         },
         Commands::Hook { command } => match command {
@@ -929,6 +949,37 @@ fn memory_l1_enqueue(cwd: Option<PathBuf>, limit: usize, session_id: Option<Stri
     }
     print_toon(CommandStatus {
         command: "memory l1 enqueue",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_l2_enqueue(cwd: Option<PathBuf>, limit: usize) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let project_root = app.paths.project_root.display().to_string();
+    let evidence = recent_l1_memory_evidence(&app.paths.db_path, &project_root, limit)?;
+    if evidence.is_empty() {
+        bail!("no active L1 memories available for L2 scene extraction");
+    }
+    let evidence_count = evidence.len();
+    let mut result = enqueue_memory_job(
+        &app.paths.db_path,
+        MemoryJobInput {
+            project_root,
+            session_id: None,
+            kind: L2_SCENE_JOB_KIND.to_string(),
+            objective: "Create or update compact L2 scene briefs from active L1 memories."
+                .to_string(),
+            evidence: Value::Array(evidence),
+            result_schema: l2_scene_result_schema(),
+        },
+    )?;
+    if let Some(object) = result.as_object_mut() {
+        object.insert("evidence_count".to_string(), json!(evidence_count));
+    }
+    print_toon(CommandStatus {
+        command: "memory l2 enqueue",
         status: "ok",
         result,
     })

@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Map, Value, json};
 
 use crate::l1::{L1_EXTRACT_JOB_KIND, apply_l1_extract_result, l1_prompt_rules};
+use crate::l2::{L2_SCENE_JOB_KIND, apply_l2_scene_result, l2_prompt_rules};
 use crate::storage::ensure_db;
 use crate::util::{content_hash, stable_id, timestamp};
 
@@ -148,16 +149,22 @@ pub(crate) fn apply_memory_job_result(
         bail!("memory job already applied: {id}");
     }
     validate_result_against_schema(&job.result_schema, &result)?;
-    let applied = if job.kind == L1_EXTRACT_JOB_KIND {
-        Some(apply_l1_extract_result(
+    let applied = match job.kind.as_str() {
+        L1_EXTRACT_JOB_KIND => Some(apply_l1_extract_result(
             db_path,
             project_root,
             id,
             &job.evidence,
             &result,
-        )?)
-    } else {
-        None
+        )?),
+        L2_SCENE_JOB_KIND => Some(apply_l2_scene_result(
+            db_path,
+            project_root,
+            id,
+            &job.evidence,
+            &result,
+        )?),
+        _ => None,
     };
     let now = timestamp();
     let stored_result = if let Some(applied) = &applied {
@@ -265,10 +272,10 @@ fn row_memory_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryJobRecord> 
 fn prompt_for_job(job: &MemoryJobRecord) -> Result<String> {
     let evidence = serde_json::to_string_pretty(&job.evidence)?;
     let schema = serde_json::to_string_pretty(&job.result_schema)?;
-    let layer_rules = if job.kind == L1_EXTRACT_JOB_KIND {
-        format!("\n{}\n", l1_prompt_rules())
-    } else {
-        String::new()
+    let layer_rules = match job.kind.as_str() {
+        L1_EXTRACT_JOB_KIND => format!("\n{}\n", l1_prompt_rules()),
+        L2_SCENE_JOB_KIND => format!("\n{}\n", l2_prompt_rules()),
+        _ => String::new(),
     };
     Ok(format!(
         r#"You are processing a ctx memory job.
@@ -371,7 +378,7 @@ mod tests {
             MemoryJobInput {
                 project_root: root.clone(),
                 session_id: None,
-                kind: "l1_extract".to_string(),
+                kind: "test_job".to_string(),
                 objective: "Extract memory candidates".to_string(),
                 evidence: json!([{"event_id": "evt1"}]),
                 result_schema: schema(),
@@ -414,7 +421,7 @@ mod tests {
             MemoryJobInput {
                 project_root: root.clone(),
                 session_id: None,
-                kind: "l1_extract".to_string(),
+                kind: "test_job".to_string(),
                 objective: "Extract memory candidates".to_string(),
                 evidence: json!([]),
                 result_schema: schema(),
@@ -434,7 +441,7 @@ mod tests {
         let input = || MemoryJobInput {
             project_root: root.clone(),
             session_id: None,
-            kind: "l1_extract".to_string(),
+            kind: "test_job".to_string(),
             objective: "Extract memory candidates".to_string(),
             evidence: json!([]),
             result_schema: schema(),

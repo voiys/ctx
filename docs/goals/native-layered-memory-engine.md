@@ -98,9 +98,10 @@ make check
   - Add accept/reject/update commands for candidates if needed.
   - Add `ctx hook recall` with bounded L1/L2/L3/offload context packing.
   - Validate with hook fixtures and recall budget tests.
-- [ ] C04: L2 scene briefs
+- [x] C04: L2 scene briefs
   - Add scene brief schema/materialization and structured scene update jobs.
   - Validate create/update/merge/archive operations with golden fixtures.
+  - Implemented `ctx memory l2 enqueue` from active L1 memories.
 - [ ] C05: L3 profile
   - Add profile revision schema and changed-scene profile update jobs.
   - Validate profile provenance, budget behavior, and no override of live repo
