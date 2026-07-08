@@ -123,6 +123,10 @@ Add tables:
   status, and host tool id.
 - `payload_blobs`: content hash, media type, size, path, redaction status.
 - `memory_candidates`: extracted L1 memories with review status and source ids.
+  The current native ctx checkpoint represents these with existing `memories`
+  rows where `status = suggested`, plus `memory_evidence` rows for source hook
+  event ids. A dedicated table can still be added later if review metadata
+  outgrows `memories.metadata_json`.
 - `memory_conflicts`: dedup decisions and target memory ids.
 - `scene_briefs`: L2 scene metadata, Markdown, summary, heat, updated time.
 - `persona_profiles`: L3 profile revisions and source scene ids.
@@ -325,7 +329,9 @@ Flow:
 3. Recall existing active memories and candidates with FTS/vector search.
 4. Ask the agent harness for dedup decisions: `store`, `update`, `merge`,
    `skip`.
-5. Save results as `memory_candidates` with `suggested` status.
+5. Save results as review-gated candidates. In the current Rust
+   implementation this means `memories.status = suggested` plus
+   `memory_evidence` provenance.
 6. Promote to active only after review, unless a future config enables
    auto-promotion.
 

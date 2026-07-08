@@ -23,6 +23,7 @@ use crate::jobs::{
     memory_job_prompt,
 };
 use crate::journal::{HookEventInput, ingest_hook_event};
+use crate::l1::{L1_EXTRACT_JOB_KIND, l1_extract_result_schema, recent_l0_evidence};
 use crate::manifest::{
     allowed_resource_ids, find_manifest_resource, find_manifest_resource_index, read_manifest,
     upsert_manifest_resource, write_manifest,
@@ -299,6 +300,11 @@ enum MemoryCommands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
+    /// Queue L1 extraction from recent redacted hook events.
+    L1 {
+        #[command(subcommand)]
+        command: MemoryL1Commands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -335,6 +341,19 @@ enum MemoryJobCommands {
     Apply {
         id: String,
         result: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryL1Commands {
+    /// Queue an L1 extraction job from recent L0 hook events.
+    Enqueue {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        session_id: Option<String>,
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
@@ -471,6 +490,13 @@ pub fn run() -> Result<()> {
                 MemoryJobCommands::Apply { id, result, cwd } => memory_job_apply(cwd, &id, &result),
             },
             MemoryCommands::Process { lease_owner, cwd } => memory_process(cwd, lease_owner),
+            MemoryCommands::L1 { command } => match command {
+                MemoryL1Commands::Enqueue {
+                    limit,
+                    session_id,
+                    cwd,
+                } => memory_l1_enqueue(cwd, limit, session_id),
+            },
         },
         Commands::Hook { command } => match command {
             HookCommands::Ingest {
@@ -814,6 +840,42 @@ fn memory_process(cwd: Option<PathBuf>, lease_owner: Option<String>) -> Result<(
                 "apply_command": format!("ctx memory job apply {id} <result.json> --cwd {}", project_root),
             },
         }),
+    })
+}
+
+fn memory_l1_enqueue(cwd: Option<PathBuf>, limit: usize, session_id: Option<String>) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let project_root = app.paths.project_root.display().to_string();
+    let evidence = recent_l0_evidence(
+        &app.paths.db_path,
+        &project_root,
+        session_id.as_deref(),
+        limit,
+    )?;
+    if evidence.is_empty() {
+        bail!("no L0 hook evidence available for L1 extraction");
+    }
+    let evidence_count = evidence.len();
+    let mut result = enqueue_memory_job(
+        &app.paths.db_path,
+        MemoryJobInput {
+            project_root,
+            session_id,
+            kind: L1_EXTRACT_JOB_KIND.to_string(),
+            objective: "Extract review-gated L1 memory candidates from recent hook events."
+                .to_string(),
+            evidence: Value::Array(evidence),
+            result_schema: l1_extract_result_schema(),
+        },
+    )?;
+    if let Some(object) = result.as_object_mut() {
+        object.insert("evidence_count".to_string(), json!(evidence_count));
+    }
+    print_toon(CommandStatus {
+        command: "memory l1 enqueue",
+        status: "ok",
+        result,
     })
 }
 

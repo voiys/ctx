@@ -4,6 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Map, Value, json};
 
+use crate::l1::{L1_EXTRACT_JOB_KIND, apply_l1_extract_result, l1_prompt_rules};
 use crate::storage::ensure_db;
 use crate::util::{content_hash, stable_id, timestamp};
 
@@ -147,8 +148,27 @@ pub(crate) fn apply_memory_job_result(
         bail!("memory job already applied: {id}");
     }
     validate_result_against_schema(&job.result_schema, &result)?;
+    let applied = if job.kind == L1_EXTRACT_JOB_KIND {
+        Some(apply_l1_extract_result(
+            db_path,
+            project_root,
+            id,
+            &job.evidence,
+            &result,
+        )?)
+    } else {
+        None
+    };
     let now = timestamp();
-    let result_json = serde_json::to_string(&result)?;
+    let stored_result = if let Some(applied) = &applied {
+        json!({
+            "submitted": result,
+            "applied": applied,
+        })
+    } else {
+        result
+    };
+    let result_json = serde_json::to_string(&stored_result)?;
     conn.execute(
         "UPDATE memory_jobs
          SET status = 'done', updated_at = ?1, result_json = ?2, error = NULL
@@ -158,6 +178,7 @@ pub(crate) fn apply_memory_job_result(
     let job = find_memory_job(&conn, project_root, id)?;
     Ok(json!({
         "job": job_json(&job),
+        "applied": applied,
     }))
 }
 
@@ -244,6 +265,11 @@ fn row_memory_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryJobRecord> 
 fn prompt_for_job(job: &MemoryJobRecord) -> Result<String> {
     let evidence = serde_json::to_string_pretty(&job.evidence)?;
     let schema = serde_json::to_string_pretty(&job.result_schema)?;
+    let layer_rules = if job.kind == L1_EXTRACT_JOB_KIND {
+        format!("\n{}\n", l1_prompt_rules())
+    } else {
+        String::new()
+    };
     Ok(format!(
         r#"You are processing a ctx memory job.
 
@@ -256,6 +282,7 @@ Rules:
 - Return only JSON matching the result schema.
 - Do not write ctx storage directly.
 - Do not call a background harness or provider endpoint.
+{layer_rules}
 
 Evidence:
 ```json
@@ -270,6 +297,7 @@ Result schema:
         id = job.id,
         kind = job.kind,
         objective = job.objective,
+        layer_rules = layer_rules,
     ))
 }
 

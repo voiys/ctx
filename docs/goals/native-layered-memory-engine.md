@@ -89,7 +89,7 @@ make check
     duplicate queue entries, and no invisible harness execution.
   - Implemented `ctx memory job enqueue` as the explicit queue entrypoint for
     hook and future layer processors.
-- [ ] C02: L1 extraction and dedup job path
+- [x] C02: L1 extraction and dedup job path
   - Emit L1 extraction prompts/schemas from L0 evidence.
   - Apply structured candidates into review-gated memory rows.
   - Add conflict/dedup apply behavior using existing FTS/vector candidate recall.

@@ -9,6 +9,7 @@ mod input;
 mod install;
 mod jobs;
 mod journal;
+mod l1;
 mod manifest;
 mod markdown;
 mod memory;

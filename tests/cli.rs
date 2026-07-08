@@ -206,12 +206,17 @@ fn ctx_with_home(home: &Path) -> Command {
 }
 
 fn first_toon_id(stdout: &[u8]) -> String {
+    first_toon_field(stdout, "id")
+}
+
+fn first_toon_field(stdout: &[u8], field: &str) -> String {
     let stdout = String::from_utf8(stdout.to_vec()).unwrap();
+    let prefix = format!("{field}: ");
     stdout
         .lines()
-        .find_map(|line| line.trim().strip_prefix("id: "))
+        .find_map(|line| line.trim().strip_prefix(&prefix))
         .map(|value| value.trim_matches('"').to_string())
-        .unwrap_or_else(|| panic!("no id line in output:\n{stdout}"))
+        .unwrap_or_else(|| panic!("no {field} line in output:\n{stdout}"))
 }
 
 #[test]
@@ -1199,6 +1204,155 @@ fn memory_job_commands_claim_prompt_and_apply_without_background_execution() {
     assert!(process.contains("background: false"));
     assert!(process.contains("ctx memory job apply"));
     assert!(process.contains("Return only JSON"));
+}
+
+#[test]
+fn l1_enqueue_and_apply_stores_review_gated_deduped_memory() {
+    let project = TestProject::new();
+
+    let hook = project
+        .ctx()
+        .args([
+            "hook",
+            "ingest",
+            "--host",
+            "codex",
+            "--event",
+            "UserMessage",
+            "--session-key",
+            "thread-l1",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .write_stdin(
+            r#"{"role":"user","content":"I prefer terse Rust test summaries.","note":"L1 source evidence"}"#,
+        )
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let event_id = first_toon_field(&hook, "event_id");
+
+    project
+        .ctx()
+        .arg("remember")
+        .arg("Active duplicate memory carries CTX_L1_DUPLICATE.")
+        .args(["--kind", "fact", "--subject", "l1.duplicate", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let enqueue = project
+        .ctx()
+        .args(["memory", "l1", "enqueue", "--limit", "10", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let job_id = first_toon_id(&enqueue);
+    let enqueue = String::from_utf8(enqueue).unwrap();
+    assert!(enqueue.contains("kind: l1_extract"));
+    assert!(enqueue.contains("evidence_count: 1"));
+
+    let prompt = project
+        .ctx()
+        .args(["memory", "job", "prompt", &job_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prompt = String::from_utf8(prompt).unwrap();
+    assert!(prompt.contains("Extract only durable, reusable memories"));
+    assert!(prompt.contains("source_event_ids"));
+    assert!(prompt.contains(&event_id));
+
+    let result_path = project.root.path().join("l1-result.json");
+    fs::write(
+        &result_path,
+        format!(
+            r#"{{
+              "scene_name":"Rust test workflow",
+              "candidates":[
+                {{
+                  "kind":"preference",
+                  "subject":"testing.rust",
+                  "trigger":"Rust changes",
+                  "content":"I prefer terse Rust test summaries.",
+                  "tags":["rust"],
+                  "source_event_ids":["{event_id}"]
+                }},
+                {{
+                  "kind":"fact",
+                  "subject":"l1.duplicate",
+                  "content":"Active duplicate memory carries CTX_L1_DUPLICATE.",
+                  "source_event_ids":["{event_id}"]
+                }}
+              ]
+            }}"#
+        ),
+    )
+    .unwrap();
+
+    let applied = project
+        .ctx()
+        .args(["memory", "job", "apply", &job_id])
+        .arg(&result_path)
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let applied = String::from_utf8(applied).unwrap();
+    assert!(applied.contains("stored_count: 1"));
+    assert!(applied.contains("skipped_count: 1"));
+    assert!(applied.contains("exact_active_duplicate"));
+    assert!(applied.contains("testing.rust"));
+
+    let review = project
+        .ctx()
+        .args(["memory", "review", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let review = String::from_utf8(review).unwrap();
+    assert!(review.contains("I prefer terse Rust test summaries."));
+    assert!(review.contains("suggested"));
+    assert!(!review.contains("CTX_L1_DUPLICATE"));
+
+    let recall = project
+        .ctx()
+        .args(["recall", "terse Rust test summaries", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recall = String::from_utf8(recall).unwrap();
+    assert!(!recall.contains("I prefer terse Rust test summaries."));
+
+    let conn = Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let evidence_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM memory_evidence e
+             JOIN memories m ON m.id = e.memory_id
+             WHERE m.subject = 'testing.rust' AND e.source_id = ?1",
+            [&event_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(evidence_count, 1);
 }
 
 #[test]
