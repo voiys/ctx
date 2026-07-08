@@ -1072,6 +1072,136 @@ fn hook_ingest_stores_redacted_event_without_project_init() {
 }
 
 #[test]
+fn memory_job_commands_claim_prompt_and_apply_without_background_execution() {
+    let project = TestProject::new();
+    let schema = r#"{"type":"object","required":["candidates"],"properties":{"candidates":{"type":"array"}}}"#;
+
+    let enqueue = project
+        .ctx()
+        .args([
+            "memory",
+            "job",
+            "enqueue",
+            "--kind",
+            "l1_extract",
+            "--objective",
+            "Extract memory candidates from hook evidence",
+            "--evidence-json",
+            r#"[{"event_id":"evt1","summary":"Prefer cargo test for Rust changes"}]"#,
+            "--result-schema-json",
+            schema,
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let job_id = first_toon_id(&enqueue);
+
+    let claimed = project
+        .ctx()
+        .args([
+            "memory",
+            "job",
+            "next",
+            "--lease-owner",
+            "visible-agent",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let claimed = String::from_utf8(claimed).unwrap();
+    assert!(claimed.contains("status: running"));
+    assert!(claimed.contains("lease_owner: \"visible-agent\""));
+    assert!(claimed.contains("attempts: 1"));
+
+    let prompt = project
+        .ctx()
+        .args(["memory", "job", "prompt", &job_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prompt = String::from_utf8(prompt).unwrap();
+    assert!(prompt.contains("Return only JSON"));
+    assert!(prompt.contains("Do not call a background harness or provider endpoint"));
+    assert!(prompt.contains("Prefer cargo test"));
+
+    let result_path = project.root.path().join("job-result.json");
+    fs::write(
+        &result_path,
+        r#"{"candidates":[{"content":"Prefer cargo test for Rust changes"}]}"#,
+    )
+    .unwrap();
+    let applied = project
+        .ctx()
+        .args(["memory", "job", "apply", &job_id])
+        .arg(&result_path)
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let applied = String::from_utf8(applied).unwrap();
+    assert!(applied.contains("status: done"));
+    assert!(applied.contains("Prefer cargo test"));
+
+    let empty = project
+        .ctx()
+        .args(["memory", "job", "next", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let empty = String::from_utf8(empty).unwrap();
+    assert!(empty.contains("job: null"));
+
+    project
+        .ctx()
+        .args([
+            "memory",
+            "job",
+            "enqueue",
+            "--kind",
+            "l1_extract",
+            "--objective",
+            "Return queued work to the visible harness",
+            "--result-schema-json",
+            schema,
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    let process = project
+        .ctx()
+        .args(["memory", "process", "--lease-owner", "codex", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let process = String::from_utf8(process).unwrap();
+    assert!(process.contains("mode: visible_harness"));
+    assert!(process.contains("background: false"));
+    assert!(process.contains("ctx memory job apply"));
+    assert!(process.contains("Return only JSON"));
+}
+
+#[test]
 fn docs_crawl_recursively_indexes_linked_pages() {
     let site = FixtureSite::new(HashMap::from([
         (

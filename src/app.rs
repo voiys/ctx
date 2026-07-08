@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use url::Url;
 
 use crate::agents::upsert_agents_block;
@@ -18,6 +18,10 @@ use crate::constants::{
 use crate::context::AppContext;
 use crate::input::resolve_input;
 use crate::install::install;
+use crate::jobs::{
+    MemoryJobInput, apply_memory_job_result, claim_next_memory_job, enqueue_memory_job, job_json,
+    memory_job_prompt,
+};
 use crate::journal::{HookEventInput, ingest_hook_event};
 use crate::manifest::{
     allowed_resource_ids, find_manifest_resource, find_manifest_resource_index, read_manifest,
@@ -283,6 +287,57 @@ enum MemoryCommands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
+    /// Manage visible harness-executed memory jobs.
+    Job {
+        #[command(subcommand)]
+        command: MemoryJobCommands,
+    },
+    /// Claim the next memory job and print its prompt for the current harness.
+    Process {
+        #[arg(long)]
+        lease_owner: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryJobCommands {
+    /// Queue a memory job for a visible agent harness to process.
+    Enqueue {
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        objective: String,
+        #[arg(long)]
+        evidence_json: Option<String>,
+        #[arg(long)]
+        result_schema_json: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Claim the oldest pending memory job for this project.
+    Next {
+        #[arg(long)]
+        lease_owner: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Print the full processing prompt for a memory job.
+    Prompt {
+        id: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Validate and apply a memory job result.
+    Apply {
+        id: String,
+        result: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -395,6 +450,27 @@ pub fn run() -> Result<()> {
                 cwd,
             } => memory_review(cwd, scope, scope_key),
             MemoryCommands::Forget { id, cwd } => memory_forget(cwd, &id),
+            MemoryCommands::Job { command } => match command {
+                MemoryJobCommands::Enqueue {
+                    kind,
+                    objective,
+                    evidence_json,
+                    result_schema_json,
+                    session_id,
+                    cwd,
+                } => memory_job_enqueue(
+                    cwd,
+                    kind,
+                    objective,
+                    evidence_json,
+                    result_schema_json,
+                    session_id,
+                ),
+                MemoryJobCommands::Next { lease_owner, cwd } => memory_job_next(cwd, lease_owner),
+                MemoryJobCommands::Prompt { id, cwd } => memory_job_prompt_command(cwd, &id),
+                MemoryJobCommands::Apply { id, result, cwd } => memory_job_apply(cwd, &id, &result),
+            },
+            MemoryCommands::Process { lease_owner, cwd } => memory_process(cwd, lease_owner),
         },
         Commands::Hook { command } => match command {
             HookCommands::Ingest {
@@ -619,6 +695,152 @@ fn memory_forget(cwd: Option<PathBuf>, id: &str) -> Result<()> {
         status: "ok",
         result,
     })
+}
+
+fn memory_job_enqueue(
+    cwd: Option<PathBuf>,
+    kind: String,
+    objective: String,
+    evidence_json: Option<String>,
+    result_schema_json: Option<String>,
+    session_id: Option<String>,
+) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let evidence = parse_json_arg_or_default("evidence-json", evidence_json, json!([]))?;
+    let result_schema = parse_json_arg_or_default(
+        "result-schema-json",
+        result_schema_json,
+        json!({"type": "object"}),
+    )?;
+    let result = enqueue_memory_job(
+        &app.paths.db_path,
+        MemoryJobInput {
+            project_root: app.paths.project_root.display().to_string(),
+            session_id,
+            kind,
+            objective,
+            evidence,
+            result_schema,
+        },
+    )?;
+    print_toon(CommandStatus {
+        command: "memory job enqueue",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_job_next(cwd: Option<PathBuf>, lease_owner: Option<String>) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let job = claim_next_memory_job(
+        &app.paths.db_path,
+        &app.paths.project_root.display().to_string(),
+        lease_owner.as_deref(),
+    )?
+    .map(|job| job_json(&job));
+    print_toon(CommandStatus {
+        command: "memory job next",
+        status: "ok",
+        result: json!({
+            "job": job,
+        }),
+    })
+}
+
+fn memory_job_prompt_command(cwd: Option<PathBuf>, id: &str) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let result = memory_job_prompt(
+        &app.paths.db_path,
+        &app.paths.project_root.display().to_string(),
+        id,
+    )?;
+    print_toon(CommandStatus {
+        command: "memory job prompt",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_job_apply(cwd: Option<PathBuf>, id: &str, result_arg: &str) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let result_json = read_job_result_arg(result_arg)?;
+    let result = apply_memory_job_result(
+        &app.paths.db_path,
+        &app.paths.project_root.display().to_string(),
+        id,
+        result_json,
+    )?;
+    print_toon(CommandStatus {
+        command: "memory job apply",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_process(cwd: Option<PathBuf>, lease_owner: Option<String>) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let project_root = app.paths.project_root.display().to_string();
+    let Some(job) =
+        claim_next_memory_job(&app.paths.db_path, &project_root, lease_owner.as_deref())?
+    else {
+        return print_toon(CommandStatus {
+            command: "memory process",
+            status: "ok",
+            result: json!({
+                "job": Value::Null,
+            }),
+        });
+    };
+    let claimed = job_json(&job);
+    let id = claimed["id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("claimed memory job has no id"))?;
+    let prompt = memory_job_prompt(&app.paths.db_path, &project_root, id)?;
+    print_toon(CommandStatus {
+        command: "memory process",
+        status: "ok",
+        result: json!({
+            "job": claimed,
+            "prompt": prompt["prompt"],
+            "result_schema": prompt["result_schema"],
+            "execution": {
+                "mode": "visible_harness",
+                "background": false,
+                "apply_command": format!("ctx memory job apply {id} <result.json> --cwd {}", project_root),
+            },
+        }),
+    })
+}
+
+fn parse_json_arg_or_default(name: &str, raw: Option<String>, default: Value) -> Result<Value> {
+    let Some(raw) = raw else {
+        return Ok(default);
+    };
+    serde_json::from_str::<Value>(&raw).with_context(|| format!("failed to parse --{name}"))
+}
+
+fn read_job_result_arg(result_arg: &str) -> Result<Value> {
+    let raw = if result_arg == "-" {
+        let mut raw = String::new();
+        io::stdin()
+            .read_to_string(&mut raw)
+            .context("failed to read memory job result JSON from stdin")?;
+        raw
+    } else if result_arg.trim_start().starts_with('{') || result_arg.trim_start().starts_with('[') {
+        result_arg.to_string()
+    } else {
+        fs::read_to_string(result_arg)
+            .with_context(|| format!("failed to read memory job result {}", result_arg))?
+    };
+    if raw.trim().is_empty() {
+        bail!("memory job result JSON is empty");
+    }
+    serde_json::from_str::<Value>(&raw).context("failed to parse memory job result JSON")
 }
 
 fn hook_ingest(

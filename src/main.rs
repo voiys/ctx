@@ -7,6 +7,7 @@ mod crawl;
 mod embeddings;
 mod input;
 mod install;
+mod jobs;
 mod journal;
 mod manifest;
 mod markdown;

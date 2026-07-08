@@ -80,13 +80,15 @@ make check
   - Port applicable utility reference tests.
   - Add initial L0 hook journal schema and `ctx hook ingest`.
   - Validate with `make check`.
-- [ ] C01: Harness job queue CLI
+- [x] C01: Harness job queue CLI
   - Implement `ctx memory job next`, `ctx memory job prompt`,
     `ctx memory job apply`, and `ctx memory process` scaffolding.
   - Jobs remain inert until a visible agent run or explicit command handles
     them.
   - Validate with unit and CLI tests for claim, lease, schema validation, apply,
-    retry/error states, and no invisible harness execution.
+    duplicate queue entries, and no invisible harness execution.
+  - Implemented `ctx memory job enqueue` as the explicit queue entrypoint for
+    hook and future layer processors.
 - [ ] C02: L1 extraction and dedup job path
   - Emit L1 extraction prompts/schemas from L0 evidence.
   - Apply structured candidates into review-gated memory rows.
