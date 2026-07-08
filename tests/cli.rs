@@ -1310,6 +1310,82 @@ fn hook_handle_ingests_event_and_injects_grounding_context() {
 }
 
 #[test]
+fn hook_install_global_writes_marketplaces_and_guidance_fallback() {
+    let project = TestProject::new();
+    let install = project
+        .ctx()
+        .args(["hook", "install", "all", "--global", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let install = String::from_utf8(install).unwrap();
+    assert!(install.contains("scope: global"));
+    assert!(install.contains("registration_command"));
+    assert!(install.contains("codex plugin marketplace add"));
+    assert!(install.contains("/plugin marketplace add"));
+
+    let home = project.home.path();
+    assert!(home.join("hooks/guidance.md").exists());
+    assert!(home.join("hooks/codex-memory-hook.sh").exists());
+    assert!(home.join("hooks/claude-memory-hook.sh").exists());
+    assert!(
+        home.join("plugin-marketplaces/codex/marketplace.json")
+            .exists()
+    );
+    assert!(
+        home.join("plugin-marketplaces/codex/plugins/ctx-memory/.codex-plugin/plugin.json")
+            .exists()
+    );
+    assert!(
+        home.join("plugin-marketplaces/claude/.claude-plugin/marketplace.json")
+            .exists()
+    );
+    assert!(
+        home.join("plugin-marketplaces/claude/plugins/ctx-memory/.claude-plugin/plugin.json")
+            .exists()
+    );
+
+    fs::write(
+        home.join("hooks/guidance.md"),
+        "custom global ctx grounding\n",
+    )
+    .unwrap();
+    let output = project
+        .ctx()
+        .args(["hook", "handle", "--host", "codex", "--cwd"])
+        .arg(project.root.path())
+        .write_stdin(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"session-1","prompt":"global grounding"}"#,
+        )
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("custom global ctx grounding"));
+
+    let doctor = project
+        .ctx()
+        .args(["hook", "doctor", "--global", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let doctor = String::from_utf8(doctor).unwrap();
+    assert!(doctor.contains("scope: global"));
+    assert!(doctor.contains("codex-memory-hook.sh"));
+    assert!(doctor.contains("claude-memory-hook.sh"));
+    assert!(doctor.contains("plugin_exists"));
+    assert!(doctor.contains("marketplace_exists"));
+}
+
+#[test]
 fn memory_job_commands_claim_prompt_and_apply_without_background_execution() {
     let project = TestProject::new();
     let schema = r#"{"type":"object","required":["candidates"],"properties":{"candidates":{"type":"array"}}}"#;

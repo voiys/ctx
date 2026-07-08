@@ -16,7 +16,10 @@ use crate::constants::{
     DEFAULT_BUDGET_TOKENS, DEFAULT_CRAWL_CONCURRENCY, DEFAULT_MAX_PAGES, DEFAULT_TOP_K,
 };
 use crate::context::AppContext;
-use crate::hooks::{doctor_hook_assets, hook_context, install_hook_assets};
+use crate::hooks::{
+    doctor_global_hook_assets, doctor_hook_assets, hook_context, install_global_hook_assets,
+    install_hook_assets,
+};
 use crate::input::resolve_input;
 use crate::install::install;
 use crate::jobs::{
@@ -419,10 +422,14 @@ enum HookCommands {
     Install {
         host: String,
         #[arg(long)]
+        global: bool,
+        #[arg(long)]
         cwd: Option<PathBuf>,
     },
     /// Check project hook assets.
     Doctor {
+        #[arg(long)]
+        global: bool,
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
@@ -627,8 +634,8 @@ pub fn run() -> Result<()> {
             },
         },
         Commands::Hook { command } => match command {
-            HookCommands::Install { host, cwd } => hook_install(cwd, &host),
-            HookCommands::Doctor { cwd } => hook_doctor(cwd),
+            HookCommands::Install { host, global, cwd } => hook_install(cwd, &host, global),
+            HookCommands::Doctor { global, cwd } => hook_doctor(cwd, global),
             HookCommands::Ingest {
                 host,
                 event,
@@ -923,10 +930,33 @@ fn memory_reject(cwd: Option<PathBuf>, id: &str) -> Result<()> {
     })
 }
 
-fn hook_install(cwd: Option<PathBuf>, host: &str) -> Result<()> {
+fn hook_install(cwd: Option<PathBuf>, host: &str, global: bool) -> Result<()> {
     let app = AppContext::load(cwd)?;
     app.ensure_global_storage()?;
-    let result = install_hook_assets(&app.paths.project_root, host)?;
+    let hosts = hook_install_hosts(host)?;
+    let result = if hosts.len() == 1 {
+        if global {
+            install_global_hook_assets(&app.paths.home, hosts[0])?
+        } else {
+            install_hook_assets(&app.paths.project_root, hosts[0])?
+        }
+    } else {
+        let hosts = hosts
+            .into_iter()
+            .map(|host| {
+                if global {
+                    install_global_hook_assets(&app.paths.home, host)
+                } else {
+                    install_hook_assets(&app.paths.project_root, host)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        json!({
+            "scope": if global { "global" } else { "project" },
+            "hosts": hosts,
+            "background_execution": false,
+        })
+    };
     print_toon(CommandStatus {
         command: "hook install",
         status: "ok",
@@ -934,10 +964,14 @@ fn hook_install(cwd: Option<PathBuf>, host: &str) -> Result<()> {
     })
 }
 
-fn hook_doctor(cwd: Option<PathBuf>) -> Result<()> {
+fn hook_doctor(cwd: Option<PathBuf>, global: bool) -> Result<()> {
     let app = AppContext::load(cwd)?;
     app.ensure_global_storage()?;
-    let result = doctor_hook_assets(&app.paths.project_root)?;
+    let result = if global {
+        doctor_global_hook_assets(&app.paths.home)?
+    } else {
+        doctor_hook_assets(&app.paths.project_root)?
+    };
     print_toon(CommandStatus {
         command: "hook doctor",
         status: "ok",
@@ -1276,7 +1310,11 @@ fn hook_handle(cwd: Option<PathBuf>, host: String, top_k: usize, budget: usize) 
             let (packed_context, _, _) = pack_l1_context(&memories, budget);
             packed_context
         };
-        let context = hook_context(&app.paths.project_root, Some(&packed_context))?;
+        let context = hook_context(
+            &app.paths.project_root,
+            &app.paths.home,
+            Some(&packed_context),
+        )?;
         let output = json!({
             "hookSpecificOutput": {
                 "hookEventName": event_name,
@@ -1322,6 +1360,18 @@ fn normalize_hook_host(host: &str) -> Result<String> {
         "codex" => Ok("codex".to_string()),
         "claude" | "claude-code" | "claude_code" => Ok("claude".to_string()),
         other => bail!("unsupported hook host: {other}"),
+    }
+}
+
+fn hook_install_hosts(host: &str) -> Result<Vec<&'static str>> {
+    if host.eq_ignore_ascii_case("all") {
+        Ok(vec!["codex", "claude"])
+    } else {
+        Ok(vec![match normalize_hook_host(host)?.as_str() {
+            "codex" => "codex",
+            "claude" => "claude",
+            other => bail!("unsupported hook host: {other}"),
+        }])
     }
 }
 
