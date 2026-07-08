@@ -221,13 +221,21 @@ fn install_codex_plugin_assets(plugin_dir: &Path) -> Result<PathBuf> {
             "name": "ctx-memory",
             "version": "0.1.0",
             "description": "Local layered memory capture and grounding guidance for Codex.",
-            "hooks": "./.codex-plugin/hooks.json",
+            "author": {
+                "name": "ctx"
+            },
             "skills": "./skills/",
             "interface": {
                 "displayName": "ctx Memory",
                 "shortDescription": "Local ctx memory capture and prompt grounding.",
+                "longDescription": "Ground Codex in local ctx project resources and capture hook evidence for explicit memory review.",
                 "developerName": "ctx",
-                "category": "Developer Tools"
+                "category": "Developer Tools",
+                "capabilities": ["Hooks", "Memory", "Local"],
+                "defaultPrompt": [
+                    "Ground this repo with ctx before answering.",
+                    "Review local ctx memory for this project."
+                ]
             }
         }),
     )?;
@@ -294,7 +302,10 @@ fn global_marketplace_paths(ctx_home: &Path, host: &str) -> MarketplacePaths {
     let plugin_dir = root.join("plugins").join("ctx-memory");
     let manifest_path = match host {
         "claude" => root.join(".claude-plugin").join("marketplace.json"),
-        _ => root.join("marketplace.json"),
+        _ => root
+            .join(".agents")
+            .join("plugins")
+            .join("marketplace.json"),
     };
     let registration_command = match host {
         "claude" => format!("/plugin marketplace add {}", root.display()),
@@ -309,10 +320,20 @@ fn global_marketplace_paths(ctx_home: &Path, host: &str) -> MarketplacePaths {
 }
 
 fn write_codex_marketplace(root: &Path) -> Result<()> {
+    let manifest_path = root
+        .join(".agents")
+        .join("plugins")
+        .join("marketplace.json");
+    if let Some(parent) = manifest_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     write_json(
-        &root.join("marketplace.json"),
+        &manifest_path,
         json!({
             "name": "ctx-memory",
+            "interface": {
+                "displayName": "ctx Memory"
+            },
             "plugins": [
                 {
                     "name": "ctx-memory",

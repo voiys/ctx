@@ -1332,13 +1332,23 @@ fn hook_install_global_writes_marketplaces_and_guidance_fallback() {
     assert!(home.join("hooks/codex-memory-hook.sh").exists());
     assert!(home.join("hooks/claude-memory-hook.sh").exists());
     assert!(
-        home.join("plugin-marketplaces/codex/marketplace.json")
+        home.join("plugin-marketplaces/codex/.agents/plugins/marketplace.json")
             .exists()
     );
     assert!(
         home.join("plugin-marketplaces/codex/plugins/ctx-memory/.codex-plugin/plugin.json")
             .exists()
     );
+    let codex_plugin_json: Value = serde_json::from_str(
+        &fs::read_to_string(
+            home.join("plugin-marketplaces/codex/plugins/ctx-memory/.codex-plugin/plugin.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(codex_plugin_json.get("hooks").is_none());
+    assert_eq!(codex_plugin_json["author"]["name"], "ctx");
+    assert!(codex_plugin_json["interface"]["capabilities"].is_array());
     assert!(
         home.join("plugin-marketplaces/claude/.claude-plugin/marketplace.json")
             .exists()
