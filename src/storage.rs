@@ -112,6 +112,118 @@ pub(crate) fn ensure_db(path: &Path) -> Result<()> {
             excerpt TEXT,
             FOREIGN KEY(memory_id) REFERENCES memories(id)
         );
+        CREATE TABLE IF NOT EXISTS agent_sessions (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            host TEXT NOT NULL,
+            project_root TEXT NOT NULL,
+            session_key TEXT,
+            session_id TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE TABLE IF NOT EXISTS hook_events (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            host TEXT NOT NULL,
+            event_name TEXT NOT NULL,
+            project_root TEXT NOT NULL,
+            session_key TEXT,
+            session_id TEXT,
+            payload_hash TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            redaction_version INTEGER NOT NULL DEFAULT 1,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(session_id) REFERENCES agent_sessions(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_hook_events_project_created
+            ON hook_events(project_root, created_at);
+        CREATE INDEX IF NOT EXISTS idx_hook_events_session
+            ON hook_events(session_id, created_at);
+        CREATE TABLE IF NOT EXISTS conversation_messages (
+            id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            session_id TEXT,
+            created_at TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(event_id) REFERENCES hook_events(id),
+            FOREIGN KEY(session_id) REFERENCES agent_sessions(id)
+        );
+        CREATE TABLE IF NOT EXISTS tool_events (
+            id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            session_id TEXT,
+            created_at TEXT NOT NULL,
+            tool_name TEXT,
+            tool_call_id TEXT,
+            input_summary TEXT,
+            output_summary TEXT,
+            status TEXT NOT NULL DEFAULT 'unknown',
+            duration_ms INTEGER,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(event_id) REFERENCES hook_events(id),
+            FOREIGN KEY(session_id) REFERENCES agent_sessions(id)
+        );
+        CREATE TABLE IF NOT EXISTS payload_blobs (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            media_type TEXT,
+            size_bytes INTEGER NOT NULL,
+            path TEXT NOT NULL,
+            redaction_version INTEGER NOT NULL DEFAULT 1,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE TABLE IF NOT EXISTS offload_nodes (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            session_id TEXT,
+            event_id TEXT,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT,
+            blob_id TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(session_id) REFERENCES agent_sessions(id),
+            FOREIGN KEY(event_id) REFERENCES hook_events(id),
+            FOREIGN KEY(blob_id) REFERENCES payload_blobs(id)
+        );
+        CREATE TABLE IF NOT EXISTS offload_edges (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            session_id TEXT,
+            source_node_id TEXT NOT NULL,
+            target_node_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(session_id) REFERENCES agent_sessions(id),
+            FOREIGN KEY(source_node_id) REFERENCES offload_nodes(id),
+            FOREIGN KEY(target_node_id) REFERENCES offload_nodes(id)
+        );
+        CREATE TABLE IF NOT EXISTS memory_jobs (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            project_root TEXT NOT NULL,
+            session_id TEXT,
+            kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            objective TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            result_schema_json TEXT NOT NULL DEFAULT '{}',
+            leased_at TEXT,
+            lease_owner TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            result_json TEXT,
+            error TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(session_id) REFERENCES agent_sessions(id)
+        );
         ",
     )?;
     ensure_chunk_columns(&conn)?;

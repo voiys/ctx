@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -17,6 +18,7 @@ use crate::constants::{
 use crate::context::AppContext;
 use crate::input::resolve_input;
 use crate::install::install;
+use crate::journal::{HookEventInput, ingest_hook_event};
 use crate::manifest::{
     allowed_resource_ids, find_manifest_resource, find_manifest_resource_index, read_manifest,
     upsert_manifest_resource, write_manifest,
@@ -164,6 +166,11 @@ enum Commands {
         #[command(subcommand)]
         command: MemoryCommands,
     },
+    /// Ingest and process agent hook events.
+    Hook {
+        #[command(subcommand)]
+        command: HookCommands,
+    },
     /// Export personal memories and notes.
     Export {
         path: PathBuf,
@@ -278,6 +285,23 @@ enum MemoryCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum HookCommands {
+    /// Store one normalized hook event from stdin.
+    Ingest {
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        event: String,
+        #[arg(long)]
+        session_key: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+}
+
 pub fn run() -> Result<()> {
     let mut args = env::args_os();
     let _program = args.next();
@@ -371,6 +395,15 @@ pub fn run() -> Result<()> {
                 cwd,
             } => memory_review(cwd, scope, scope_key),
             MemoryCommands::Forget { id, cwd } => memory_forget(cwd, &id),
+        },
+        Commands::Hook { command } => match command {
+            HookCommands::Ingest {
+                host,
+                event,
+                session_key,
+                session_id,
+                cwd,
+            } => hook_ingest(cwd, host, event, session_key, session_id),
         },
         Commands::Export { path, cwd } => export_personal(cwd, &path),
         Commands::Import { path, cwd } => import_personal(cwd, &path),
@@ -583,6 +616,41 @@ fn memory_forget(cwd: Option<PathBuf>, id: &str) -> Result<()> {
     let result = forget_memory(&app.paths.db_path, id, &scopes)?;
     print_toon(CommandStatus {
         command: "memory forget",
+        status: "ok",
+        result,
+    })
+}
+
+fn hook_ingest(
+    cwd: Option<PathBuf>,
+    host: String,
+    event_name: String,
+    session_key: Option<String>,
+    session_id: Option<String>,
+) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let mut raw = String::new();
+    io::stdin()
+        .read_to_string(&mut raw)
+        .context("failed to read hook JSON from stdin")?;
+    if raw.trim().is_empty() {
+        bail!("hook ingest requires JSON on stdin");
+    }
+    let payload = serde_json::from_str(&raw).context("failed to parse hook JSON from stdin")?;
+    let result = ingest_hook_event(
+        &app.paths.db_path,
+        HookEventInput {
+            host,
+            event_name,
+            project_root: app.paths.project_root.display().to_string(),
+            session_key,
+            session_id,
+            payload,
+        },
+    )?;
+    print_toon(CommandStatus {
+        command: "hook ingest",
         status: "ok",
         result,
     })

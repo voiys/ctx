@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use assert_cmd::Command;
+use rusqlite::Connection;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tiny_http::{Response, Server};
@@ -1002,6 +1003,72 @@ fn suggested_memories_are_reviewable_but_not_recalled_by_default() {
         .clone();
     let recall = String::from_utf8(recall).unwrap();
     assert!(!recall.contains("Suggested memory mentions"));
+}
+
+#[test]
+fn hook_ingest_stores_redacted_event_without_project_init() {
+    let project = TestProject::new();
+
+    let output = project
+        .ctx()
+        .args([
+            "hook",
+            "ingest",
+            "--host",
+            "codex",
+            "--event",
+            "PostToolUse",
+            "--session-key",
+            "thread-123",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .write_stdin(r#"{"tool":"shell","api_key":"sk-test-secret","message":"hello hook"}"#)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("hook ingest"));
+    assert!(output.contains("queued_jobs: 0"));
+
+    let conn = Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let row: (String, String, String, String, String) = conn
+        .query_row(
+            "SELECT host, event_name, project_root, session_key, payload_json FROM hook_events",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(row.0, "codex");
+    assert_eq!(row.1, "PostToolUse");
+    assert_eq!(
+        row.2,
+        project
+            .root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .display()
+            .to_string()
+    );
+    assert_eq!(row.3, "thread-123");
+    assert!(row.4.contains("[redacted]"));
+    assert!(!row.4.contains("sk-test-secret"));
+
+    let session_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM agent_sessions", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(session_count, 1);
 }
 
 #[test]
