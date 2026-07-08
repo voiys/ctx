@@ -149,9 +149,9 @@ and referenced from SQLite.
 User-facing commands:
 
 ```sh
-ctx hooks install codex --scope project --cwd <repo>
-ctx hooks install claude --scope project --cwd <repo>
-ctx hooks doctor --cwd <repo>
+ctx hook install codex --cwd <repo>
+ctx hook install claude --cwd <repo>
+ctx hook doctor --cwd <repo>
 
 ctx memory review --cwd <repo>
 ctx memory accept <candidate-id> --cwd <repo>

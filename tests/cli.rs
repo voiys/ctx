@@ -266,6 +266,10 @@ fn init_writes_agents_block_with_memory_guidance() {
     assert!(agents.contains("ctx recall \"<task, repo, or failure pattern>\" --cwd <repo>"));
     assert!(agents.contains("ctx remember \"<concise reusable lesson>\""));
     assert!(agents.contains("--suggested"));
+    assert!(agents.contains("ctx hook recall \"<latest user turn or task>\" --cwd <repo>"));
+    assert!(agents.contains("ctx memory process --cwd <repo>"));
+    assert!(agents.contains("ctx memory job apply <id> <result.json> --cwd <repo>"));
+    assert!(agents.contains("ctx offload graph --cwd <repo>"));
     assert!(agents.contains("ctx query \"<question>\" --cwd <repo>"));
 
     project
@@ -1206,6 +1210,57 @@ fn hook_ingest_stores_redacted_event_without_project_init() {
         .query_row("SELECT COUNT(*) FROM agent_sessions", [], |row| row.get(0))
         .unwrap();
     assert_eq!(session_count, 1);
+}
+
+#[test]
+fn hook_install_writes_codex_and_claude_assets_without_background_execution() {
+    let project = TestProject::new();
+
+    let codex = project
+        .ctx()
+        .args(["hook", "install", "codex", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let codex = String::from_utf8(codex).unwrap();
+    assert!(codex.contains("host: codex"));
+    assert!(codex.contains("background_execution: false"));
+
+    project
+        .ctx()
+        .args(["hook", "install", "claude", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let hooks_dir = project.root.path().join(".ctx/hooks");
+    let codex_script = hooks_dir.join("codex-memory-hook.sh");
+    let claude_script = hooks_dir.join("claude-memory-hook.sh");
+    let codex_script_content = fs::read_to_string(&codex_script).unwrap();
+    let claude_script_content = fs::read_to_string(&claude_script).unwrap();
+    assert!(codex_script_content.contains("ctx hook ingest"));
+    assert!(codex_script_content.contains("--host \"codex\""));
+    assert!(claude_script_content.contains("--host \"claude\""));
+    assert!(!codex_script_content.contains("memory process"));
+
+    let doctor = project
+        .ctx()
+        .args(["hook", "doctor", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let doctor = String::from_utf8(doctor).unwrap();
+    assert!(doctor.contains("codex-memory-hook.sh"));
+    assert!(doctor.contains("claude-memory-hook.sh"));
+    assert!(doctor.contains("hosts[2]"));
+    assert!(doctor.contains("true,true"));
+    assert!(doctor.contains("background_execution: false"));
 }
 
 #[test]

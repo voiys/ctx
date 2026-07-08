@@ -16,6 +16,7 @@ use crate::constants::{
     DEFAULT_BUDGET_TOKENS, DEFAULT_CRAWL_CONCURRENCY, DEFAULT_MAX_PAGES, DEFAULT_TOP_K,
 };
 use crate::context::AppContext;
+use crate::hooks::{doctor_hook_assets, install_hook_assets};
 use crate::input::resolve_input;
 use crate::install::install;
 use crate::jobs::{
@@ -414,6 +415,17 @@ enum MemoryL3Commands {
 
 #[derive(Subcommand)]
 enum HookCommands {
+    /// Install project hook assets for an agent host.
+    Install {
+        host: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Check project hook assets.
+    Doctor {
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
     /// Store one normalized hook event from stdin.
     Ingest {
         #[arg(long)]
@@ -604,6 +616,8 @@ pub fn run() -> Result<()> {
             },
         },
         Commands::Hook { command } => match command {
+            HookCommands::Install { host, cwd } => hook_install(cwd, &host),
+            HookCommands::Doctor { cwd } => hook_doctor(cwd),
             HookCommands::Ingest {
                 host,
                 event,
@@ -887,6 +901,28 @@ fn memory_reject(cwd: Option<PathBuf>, id: &str) -> Result<()> {
     let result = reject_memory(&app.paths.db_path, id, &scopes)?;
     print_toon(CommandStatus {
         command: "memory reject",
+        status: "ok",
+        result,
+    })
+}
+
+fn hook_install(cwd: Option<PathBuf>, host: &str) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let result = install_hook_assets(&app.paths.project_root, host)?;
+    print_toon(CommandStatus {
+        command: "hook install",
+        status: "ok",
+        result,
+    })
+}
+
+fn hook_doctor(cwd: Option<PathBuf>) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let result = doctor_hook_assets(&app.paths.project_root)?;
+    print_toon(CommandStatus {
+        command: "hook doctor",
         status: "ok",
         result,
     })

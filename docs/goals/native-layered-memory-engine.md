@@ -113,7 +113,7 @@ make check
   - Validate large payload storage, node lookup, and Mermaid output.
   - Implemented `ctx offload add`, `ctx offload show`, and
     `ctx offload graph`.
-- [ ] C07: Hook installers and generated agent guidance
+- [x] C07: Hook installers and generated agent guidance
   - Add Codex and Claude Code hook installer/doctor commands.
   - Update generated `AGENTS.md` block with memory-job/offload instructions.
   - Validate generated config and project guidance tests.

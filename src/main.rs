@@ -5,6 +5,7 @@ mod constants;
 mod context;
 mod crawl;
 mod embeddings;
+mod hooks;
 mod input;
 mod install;
 mod jobs;
