@@ -117,11 +117,16 @@ make check
   - Add Codex and Claude Code hook installer/doctor commands.
   - Update generated `AGENTS.md` block with memory-job/offload instructions.
   - Validate generated config and project guidance tests.
-- [ ] C08: Final audit
+- [x] C08: Final audit
   - Re-run Tencent reference inventory.
   - Confirm non-applicable tests remain documented.
   - Run `make check`.
   - Review diff for accidental direct-provider/gateway/background-worker paths.
+  - Final audit evidence: Tencent cache has 171 non-Git files and 107 source
+    files; `src/offload/local-llm` prompt/parser files were the direct
+    reference for L1/L2/L3 job prompts and parsers.
+  - Direct-provider/background scan found only explicit guardrails/tests, not
+    implementation paths.
 
 ## Setup Research Notes
 
