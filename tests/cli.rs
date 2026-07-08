@@ -219,6 +219,10 @@ fn first_toon_field(stdout: &[u8], field: &str) -> String {
         .unwrap_or_else(|| panic!("no {field} line in output:\n{stdout}"))
 }
 
+fn first_toon_usize(stdout: &[u8], field: &str) -> usize {
+    first_toon_field(stdout, field).parse().unwrap()
+}
+
 #[test]
 fn root_help_puts_agent_quick_start_before_usage() {
     for args in [Vec::<&str>::new(), vec!["--help"]] {
@@ -1008,6 +1012,134 @@ fn suggested_memories_are_reviewable_but_not_recalled_by_default() {
         .clone();
     let recall = String::from_utf8(recall).unwrap();
     assert!(!recall.contains("Suggested memory mentions"));
+}
+
+#[test]
+fn memory_accept_reject_and_hook_recall_pack_active_context() {
+    let project = TestProject::new();
+
+    let suggested = project
+        .ctx()
+        .arg("remember")
+        .arg("When doing hook recall promotion, use COMPACT_SUMMARY_MODE.")
+        .args([
+            "--kind",
+            "preference",
+            "--subject",
+            "hook.recall",
+            "--suggested",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let memory_id = first_toon_id(&suggested);
+
+    let before = project
+        .ctx()
+        .args(["hook", "recall", "hook recall promotion", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let before = String::from_utf8(before).unwrap();
+    assert!(!before.contains("COMPACT_SUMMARY_MODE"));
+
+    let accepted = project
+        .ctx()
+        .args(["memory", "accept", &memory_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let accepted = String::from_utf8(accepted).unwrap();
+    assert!(accepted.contains("status: active"));
+    assert!(accepted.contains("confirmed_at:"));
+
+    let recall = project
+        .ctx()
+        .args([
+            "hook",
+            "recall",
+            "hook recall promotion",
+            "--budget",
+            "64",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recall = String::from_utf8(recall.clone()).unwrap();
+    assert!(recall.contains("COMPACT_SUMMARY_MODE"));
+    assert!(recall.contains("<ctx-memory layer=\\\"l1\\\">"));
+    assert!(recall.contains("l2_scene_briefs"));
+    assert!(first_toon_usize(recall.as_bytes(), "estimated_tokens") <= 64);
+
+    let tight = project
+        .ctx()
+        .args([
+            "hook",
+            "recall",
+            "hook recall promotion",
+            "--budget",
+            "4",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(first_toon_usize(&tight, "estimated_tokens") <= 4);
+
+    let rejected = project
+        .ctx()
+        .arg("remember")
+        .arg("Rejected candidate uses REJECTED_MODE.")
+        .args([
+            "--kind",
+            "fact",
+            "--subject",
+            "hook.reject",
+            "--suggested",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rejected_id = first_toon_id(&rejected);
+    project
+        .ctx()
+        .args(["memory", "reject", &rejected_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let review = project
+        .ctx()
+        .args(["memory", "review", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let review = String::from_utf8(review).unwrap();
+    assert!(!review.contains("REJECTED_MODE"));
 }
 
 #[test]

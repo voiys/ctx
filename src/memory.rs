@@ -602,6 +602,64 @@ pub(crate) fn forget_memory(
     }))
 }
 
+pub(crate) fn accept_memory(
+    db_path: &Path,
+    id: &str,
+    scopes: &[ResolvedMemoryScope],
+) -> Result<serde_json::Value> {
+    transition_memory_status(db_path, id, scopes, "active", Some("suggested"), true)
+}
+
+pub(crate) fn reject_memory(
+    db_path: &Path,
+    id: &str,
+    scopes: &[ResolvedMemoryScope],
+) -> Result<serde_json::Value> {
+    transition_memory_status(db_path, id, scopes, "dismissed", Some("suggested"), false)
+}
+
+fn transition_memory_status(
+    db_path: &Path,
+    id: &str,
+    scopes: &[ResolvedMemoryScope],
+    status: &str,
+    expected_status: Option<&str>,
+    confirm: bool,
+) -> Result<serde_json::Value> {
+    ensure_db(db_path)?;
+    let now = timestamp();
+    let conn = Connection::open(db_path)?;
+    let memory = find_memory(&conn, id)?;
+    if !scope_matches(&memory, scopes) {
+        bail!("memory not found: {id}");
+    }
+    if let Some(expected_status) = expected_status
+        && memory.status != expected_status
+    {
+        bail!(
+            "memory {id} has status {}, expected {expected_status}",
+            memory.status
+        );
+    }
+    if confirm {
+        conn.execute(
+            "UPDATE memories
+             SET status = ?1, updated_at = ?2, confirmed_at = COALESCE(confirmed_at, ?2)
+             WHERE id = ?3",
+            params![status, now, id],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE memories SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status, now, id],
+        )?;
+    }
+    let memory = find_memory(&conn, id)?;
+    Ok(json!({
+        "memory": memory_json(&memory),
+    }))
+}
+
 fn find_memory(conn: &Connection, id: &str) -> Result<MemoryRecord> {
     conn.query_row(
         "SELECT id, created_at, updated_at, scope, scope_key, kind, status, subject,

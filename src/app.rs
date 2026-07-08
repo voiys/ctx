@@ -29,8 +29,9 @@ use crate::manifest::{
     upsert_manifest_resource, write_manifest,
 };
 use crate::memory::{
-    RememberInput, ResolvedMemoryScope, export_memories, forget_memory, list_memories,
-    recall as recall_memories, remember as remember_memory, show_memory,
+    RememberInput, ResolvedMemoryScope, accept_memory, export_memories, forget_memory,
+    list_memories, recall as recall_memories, reject_memory, remember as remember_memory,
+    show_memory,
 };
 use crate::models::{
     CommandStatus, Defaults, Manifest, MemoryKind, MemoryScope, MemoryStatus, QueryKind,
@@ -288,6 +289,18 @@ enum MemoryCommands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
+    /// Promote a suggested memory to active.
+    Accept {
+        id: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Reject a suggested memory.
+    Reject {
+        id: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
     /// Manage visible harness-executed memory jobs.
     Job {
         #[command(subcommand)]
@@ -371,6 +384,16 @@ enum HookCommands {
         session_key: Option<String>,
         #[arg(long)]
         session_id: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Recall bounded memory context for hook-time prompt injection.
+    Recall {
+        question: String,
+        #[arg(long, default_value_t = DEFAULT_TOP_K)]
+        top_k: usize,
+        #[arg(long, default_value_t = DEFAULT_BUDGET_TOKENS)]
+        budget: usize,
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
@@ -469,6 +492,8 @@ pub fn run() -> Result<()> {
                 cwd,
             } => memory_review(cwd, scope, scope_key),
             MemoryCommands::Forget { id, cwd } => memory_forget(cwd, &id),
+            MemoryCommands::Accept { id, cwd } => memory_accept(cwd, &id),
+            MemoryCommands::Reject { id, cwd } => memory_reject(cwd, &id),
             MemoryCommands::Job { command } => match command {
                 MemoryJobCommands::Enqueue {
                     kind,
@@ -506,6 +531,12 @@ pub fn run() -> Result<()> {
                 session_id,
                 cwd,
             } => hook_ingest(cwd, host, event, session_key, session_id),
+            HookCommands::Recall {
+                question,
+                top_k,
+                budget,
+                cwd,
+            } => hook_recall(cwd, &question, top_k, budget),
         },
         Commands::Export { path, cwd } => export_personal(cwd, &path),
         Commands::Import { path, cwd } => import_personal(cwd, &path),
@@ -718,6 +749,30 @@ fn memory_forget(cwd: Option<PathBuf>, id: &str) -> Result<()> {
     let result = forget_memory(&app.paths.db_path, id, &scopes)?;
     print_toon(CommandStatus {
         command: "memory forget",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_accept(cwd: Option<PathBuf>, id: &str) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let scopes = recall_scopes(&app.paths, None, None)?;
+    let result = accept_memory(&app.paths.db_path, id, &scopes)?;
+    print_toon(CommandStatus {
+        command: "memory accept",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_reject(cwd: Option<PathBuf>, id: &str) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let scopes = recall_scopes(&app.paths, None, None)?;
+    let result = reject_memory(&app.paths.db_path, id, &scopes)?;
+    print_toon(CommandStatus {
+        command: "memory reject",
         status: "ok",
         result,
     })
@@ -938,6 +993,99 @@ fn hook_ingest(
         status: "ok",
         result,
     })
+}
+
+fn hook_recall(cwd: Option<PathBuf>, question: &str, top_k: usize, budget: usize) -> Result<()> {
+    if budget == 0 {
+        bail!("hook recall budget must be greater than zero");
+    }
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let scopes = recall_scopes(&app.paths, None, None)?;
+    let memories = recall_memories(&app.paths.db_path, question, &scopes, top_k)?;
+    let (packed_context, selected_l1, estimated_tokens) = pack_l1_context(&memories, budget);
+    print_toon(CommandStatus {
+        command: "hook recall",
+        status: "ok",
+        result: json!({
+            "question": question,
+            "top_k": top_k,
+            "budget_tokens": budget,
+            "estimated_tokens": estimated_tokens,
+            "packed_context": packed_context,
+            "layers": {
+                "l1": selected_l1,
+                "l2_scene_briefs": Vec::<Value>::new(),
+                "l3_profile": Value::Null,
+                "offload": Vec::<Value>::new(),
+            },
+        }),
+    })
+}
+
+fn pack_l1_context(memories: &[Value], budget_tokens: usize) -> (String, Vec<Value>, usize) {
+    let mut selected = Vec::new();
+    let mut entries = Vec::new();
+    let mut used_tokens = 0usize;
+    for item in memories {
+        let Some(memory) = item.get("memory") else {
+            continue;
+        };
+        let kind = memory
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("memory");
+        let subject = memory
+            .get("subject")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let content = memory.get("content").and_then(Value::as_str).unwrap_or("");
+        if content.trim().is_empty() {
+            continue;
+        }
+        let mut entry = format!("- [{kind}:{subject}] {content}");
+        let mut entry_tokens = estimate_tokens(&entry);
+        if used_tokens + entry_tokens > budget_tokens {
+            if selected.is_empty() {
+                entry = truncate_chars(&entry, budget_tokens.saturating_mul(4));
+                entry_tokens = estimate_tokens(&entry);
+            } else {
+                break;
+            }
+        }
+        used_tokens += entry_tokens;
+        entries.push(entry);
+        selected.push(item.clone());
+        if used_tokens >= budget_tokens {
+            break;
+        }
+    }
+    if entries.is_empty() {
+        return (String::new(), selected, used_tokens);
+    }
+    (
+        format!(
+            "<ctx-memory layer=\"l1\">\n{}\n</ctx-memory>",
+            entries.join("\n")
+        ),
+        selected,
+        used_tokens,
+    )
+}
+
+fn estimate_tokens(value: &str) -> usize {
+    value.chars().count().div_ceil(4).max(1)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut out = value.chars().take(keep).collect::<String>();
+    out.push_str("...");
+    out
 }
 
 fn export_personal(cwd: Option<PathBuf>, path: &Path) -> Result<()> {

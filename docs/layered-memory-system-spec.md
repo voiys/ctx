@@ -157,6 +157,7 @@ ctx memory review --cwd <repo>
 ctx memory accept <candidate-id> --cwd <repo>
 ctx memory reject <candidate-id> --cwd <repo>
 ctx memory brief "<task>" --cwd <repo>
+ctx hook recall "<task or latest user turn>" --cwd <repo>
 
 ctx event show <node-id-or-event-id> --cwd <repo>
 ctx offload graph --cwd <repo>

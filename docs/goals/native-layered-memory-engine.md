@@ -94,7 +94,7 @@ make check
   - Apply structured candidates into review-gated memory rows.
   - Add conflict/dedup apply behavior using existing FTS/vector candidate recall.
   - Validate with Tencent-inspired fixtures and existing memory recall tests.
-- [ ] C03: Review promotion and recall injection
+- [x] C03: Review promotion and recall injection
   - Add accept/reject/update commands for candidates if needed.
   - Add `ctx hook recall` with bounded L1/L2/L3/offload context packing.
   - Validate with hook fixtures and recall budget tests.
