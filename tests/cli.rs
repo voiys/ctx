@@ -1241,10 +1241,20 @@ fn hook_install_writes_codex_and_claude_assets_without_background_execution() {
     let claude_script = hooks_dir.join("claude-memory-hook.sh");
     let codex_script_content = fs::read_to_string(&codex_script).unwrap();
     let claude_script_content = fs::read_to_string(&claude_script).unwrap();
-    assert!(codex_script_content.contains("ctx hook ingest"));
+    assert!(codex_script_content.contains("ctx hook handle"));
     assert!(codex_script_content.contains("--host \"codex\""));
     assert!(claude_script_content.contains("--host \"claude\""));
     assert!(!codex_script_content.contains("memory process"));
+    assert!(hooks_dir.join("guidance.md").exists());
+
+    let codex_plugin = project.root.path().join(".ctx/plugins/codex");
+    let claude_plugin = project.root.path().join(".ctx/plugins/claude");
+    assert!(codex_plugin.join(".codex-plugin/plugin.json").exists());
+    assert!(codex_plugin.join(".codex-plugin/hooks.json").exists());
+    assert!(codex_plugin.join("bin/ctx-codex-hook.sh").exists());
+    assert!(claude_plugin.join(".claude-plugin/plugin.json").exists());
+    assert!(claude_plugin.join("hooks/hooks.json").exists());
+    assert!(claude_plugin.join("bin/ctx-claude-hook.sh").exists());
 
     let doctor = project
         .ctx()
@@ -1260,7 +1270,43 @@ fn hook_install_writes_codex_and_claude_assets_without_background_execution() {
     assert!(doctor.contains("claude-memory-hook.sh"));
     assert!(doctor.contains("hosts[2]"));
     assert!(doctor.contains("true,true"));
+    assert!(doctor.contains("plugin_exists"));
     assert!(doctor.contains("background_execution: false"));
+}
+
+#[test]
+fn hook_handle_ingests_event_and_injects_grounding_context() {
+    let project = TestProject::new();
+    project
+        .ctx()
+        .args(["hook", "install", "codex", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let output = project
+        .ctx()
+        .args(["hook", "handle", "--host", "codex", "--cwd"])
+        .arg(project.root.path())
+        .write_stdin(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"session-1","turn_id":"turn-1","prompt":"change the ctx hook plugin"}"#,
+        )
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("hookSpecificOutput"));
+    assert!(output.contains("additionalContext"));
+    assert!(output.contains("ctx show --cwd <repo>"));
+    assert!(!output.contains("command: hook ingest"));
+
+    let conn = Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let event_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM hook_events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(event_count, 1);
 }
 
 #[test]

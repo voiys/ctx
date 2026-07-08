@@ -16,7 +16,7 @@ use crate::constants::{
     DEFAULT_BUDGET_TOKENS, DEFAULT_CRAWL_CONCURRENCY, DEFAULT_MAX_PAGES, DEFAULT_TOP_K,
 };
 use crate::context::AppContext;
-use crate::hooks::{doctor_hook_assets, install_hook_assets};
+use crate::hooks::{doctor_hook_assets, hook_context, install_hook_assets};
 use crate::input::resolve_input;
 use crate::install::install;
 use crate::jobs::{
@@ -439,6 +439,17 @@ enum HookCommands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
+    /// Handle one host lifecycle hook from stdin and return host-compatible hook output.
+    Handle {
+        #[arg(long)]
+        host: String,
+        #[arg(long, default_value_t = DEFAULT_TOP_K)]
+        top_k: usize,
+        #[arg(long, default_value_t = DEFAULT_BUDGET_TOKENS)]
+        budget: usize,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
     /// Recall bounded memory context for hook-time prompt injection.
     Recall {
         question: String,
@@ -625,6 +636,12 @@ pub fn run() -> Result<()> {
                 session_id,
                 cwd,
             } => hook_ingest(cwd, host, event, session_key, session_id),
+            HookCommands::Handle {
+                host,
+                top_k,
+                budget,
+                cwd,
+            } => hook_handle(cwd, host, top_k, budget),
             HookCommands::Recall {
                 question,
                 top_k,
@@ -1207,6 +1224,71 @@ fn hook_ingest(
     })
 }
 
+fn hook_handle(cwd: Option<PathBuf>, host: String, top_k: usize, budget: usize) -> Result<()> {
+    if budget == 0 {
+        bail!("hook handle budget must be greater than zero");
+    }
+    let host = normalize_hook_host(&host)?;
+    let mut raw = String::new();
+    io::stdin()
+        .read_to_string(&mut raw)
+        .context("failed to read hook JSON from stdin")?;
+    if raw.trim().is_empty() {
+        bail!("hook handle requires JSON on stdin");
+    }
+    let payload = serde_json::from_str::<Value>(&raw).context("failed to parse hook JSON")?;
+    let hook_cwd = cwd.or_else(|| json_string(&payload, "cwd").map(PathBuf::from));
+    let app = AppContext::load(hook_cwd)?;
+    app.ensure_global_storage()?;
+
+    let event_name = json_string(&payload, "hook_event_name")
+        .or_else(|| env::var("CTX_HOOK_EVENT").ok())
+        .or_else(|| env::var("CLAUDE_HOOK_EVENT_NAME").ok())
+        .or_else(|| env::var("CODEX_HOOK_EVENT_NAME").ok())
+        .unwrap_or_else(|| "unknown".to_string());
+    let session_key = json_string(&payload, "session_id")
+        .or_else(|| env::var("CTX_SESSION_KEY").ok())
+        .or_else(|| env::var("CLAUDE_SESSION_ID").ok())
+        .or_else(|| env::var("CODEX_SESSION_ID").ok());
+    let session_id = json_string(&payload, "turn_id")
+        .or_else(|| json_string(&payload, "tool_use_id"))
+        .or_else(|| json_string(&payload, "agent_id"));
+
+    ingest_hook_event(
+        &app.paths.db_path,
+        HookEventInput {
+            host: host.clone(),
+            event_name: event_name.clone(),
+            project_root: app.paths.project_root.display().to_string(),
+            session_key,
+            session_id,
+            payload: payload.clone(),
+        },
+    )?;
+
+    if should_inject_hook_context(&event_name) {
+        let question = json_string(&payload, "prompt").unwrap_or_default();
+        let packed_context = if question.trim().is_empty() {
+            String::new()
+        } else {
+            let scopes = recall_scopes(&app.paths, None, None)?;
+            let memories = recall_memories(&app.paths.db_path, &question, &scopes, top_k)?;
+            let (packed_context, _, _) = pack_l1_context(&memories, budget);
+            packed_context
+        };
+        let context = hook_context(&app.paths.project_root, Some(&packed_context))?;
+        let output = json!({
+            "hookSpecificOutput": {
+                "hookEventName": event_name,
+                "additionalContext": context,
+            }
+        });
+        println!("{}", serde_json::to_string(&output)?);
+    }
+
+    Ok(())
+}
+
 fn hook_recall(cwd: Option<PathBuf>, question: &str, top_k: usize, budget: usize) -> Result<()> {
     if budget == 0 {
         bail!("hook recall budget must be greater than zero");
@@ -1233,6 +1315,27 @@ fn hook_recall(cwd: Option<PathBuf>, question: &str, top_k: usize, budget: usize
             },
         }),
     })
+}
+
+fn normalize_hook_host(host: &str) -> Result<String> {
+    match host.to_ascii_lowercase().as_str() {
+        "codex" => Ok("codex".to_string()),
+        "claude" | "claude-code" | "claude_code" => Ok("claude".to_string()),
+        other => bail!("unsupported hook host: {other}"),
+    }
+}
+
+fn json_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn should_inject_hook_context(event_name: &str) -> bool {
+    matches!(event_name, "SessionStart" | "UserPromptSubmit")
 }
 
 fn pack_l1_context(memories: &[Value], budget_tokens: usize) -> (String, Vec<Value>, usize) {
