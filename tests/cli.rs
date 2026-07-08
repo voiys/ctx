@@ -2507,13 +2507,77 @@ fn unlink_removes_project_link_without_deleting_cache() {
 fn install_copies_binary_to_requested_bin_dir() {
     let project = TestProject::new();
     let bin_dir = project.root.path().join("bin");
-    project
+    let output = project
         .ctx()
         .args(["install", "--bin-dir"])
         .arg(&bin_dir)
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("install_version_status: new_install"));
     assert!(bin_dir.join("ctx").exists());
+    let metadata_path = bin_dir.join("ctx.install.json");
+    assert!(metadata_path.exists());
+    let metadata: Value =
+        serde_json::from_str(&fs::read_to_string(metadata_path).unwrap()).unwrap();
+    assert_eq!(metadata["version"], env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn install_reports_replacing_untracked_binary() {
+    let project = TestProject::new();
+    let bin_dir = project.root.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(bin_dir.join("ctx"), "old binary placeholder").unwrap();
+    let output = project
+        .ctx()
+        .args(["install", "--bin-dir"])
+        .arg(&bin_dir)
+        .arg("--force")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("install_version_status: replaced_untracked_install"));
+    assert!(output.contains("existing ctx install had no version metadata"));
+}
+
+#[test]
+fn doctor_reports_outdated_default_install_metadata() {
+    let project = TestProject::new();
+    let bin_dir = project.home.path().join(".local/bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(bin_dir.join("ctx"), "old binary placeholder").unwrap();
+    fs::write(
+        bin_dir.join("ctx.install.json"),
+        r#"{
+  "version": "0.1.0",
+  "installed_at": "2026-01-01T00:00:00Z",
+  "source": "/tmp/ctx",
+  "target": "/tmp/home/.local/bin/ctx"
+}
+"#,
+    )
+    .unwrap();
+    let output = project
+        .ctx()
+        .env("HOME", project.home.path())
+        .args(["doctor", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("installed_version: \"0.1.0\""));
+    assert!(output.contains("status: outdated"));
+    assert!(output.contains("default ctx install is older"));
 }
 
 #[test]

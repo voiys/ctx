@@ -81,6 +81,17 @@ ctx --version
 
 Make sure `~/.local/bin` is on your `PATH`. If you prefer copying the binary
 instead of linking it, run `make install-local` from the tagged checkout.
+`ctx install` writes `ctx.install.json` next to the installed binary. `ctx doctor`
+reports when the default `~/.local/bin/ctx` install metadata is missing or older
+than the running checkout.
+
+To prepare a new local release version:
+
+```sh
+make version VERSION=0.2.0
+cargo test
+make install-local
+```
 
 ## Development Checks
 

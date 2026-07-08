@@ -21,7 +21,7 @@ use crate::hooks::{
     install_hook_assets,
 };
 use crate::input::resolve_input;
-use crate::install::install;
+use crate::install::{default_install_status, install};
 use crate::jobs::{
     MemoryJobInput, apply_memory_job_result, claim_next_memory_job, enqueue_memory_job, job_json,
     memory_job_prompt,
@@ -2532,6 +2532,7 @@ fn doctor(cwd: Option<PathBuf>) -> Result<()> {
             "home": paths.home,
             "db_path": paths.db_path,
             "db_ok": db_ok,
+            "install": default_install_status()?,
             "project_resource_count": resource_count,
         }),
     })

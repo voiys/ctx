@@ -16,7 +16,7 @@ endif
 CARGO_RELEASE_RUSTFLAGS := $(strip $(RUSTFLAGS) $(if $(MACOS_CLANG_RUNTIME_DIR),-L native=$(MACOS_CLANG_RUNTIME_DIR)))
 CARGO_RELEASE_ENV := $(if $(CARGO_RELEASE_RUSTFLAGS),RUSTFLAGS="$(CARGO_RELEASE_RUSTFLAGS)")
 
-.PHONY: audit bench-retrieval build check install-local lint nextest test unused-deps
+.PHONY: audit bench-retrieval build check install-local lint nextest test unused-deps version
 
 build:
 	$(CARGO_RELEASE_ENV) cargo build --release --locked
@@ -26,6 +26,10 @@ bench-retrieval: build
 
 install-local: build
 	./target/release/ctx install --force
+
+version:
+	@test -n "$(VERSION)" || (echo "usage: make version VERSION=0.2.0" >&2; exit 2)
+	python3 scripts/bump_version.py "$(VERSION)"
 
 test:
 	cargo test --locked

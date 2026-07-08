@@ -219,7 +219,7 @@ fn install_codex_plugin_assets(plugin_dir: &Path) -> Result<PathBuf> {
         &manifest_dir.join("plugin.json"),
         json!({
             "name": "ctx-memory",
-            "version": "0.1.0",
+            "version": env!("CARGO_PKG_VERSION"),
             "description": "Local layered memory capture and grounding guidance for Codex.",
             "author": {
                 "name": "ctx"
@@ -263,7 +263,7 @@ fn install_claude_plugin_assets(plugin_dir: &Path) -> Result<PathBuf> {
         json!({
             "name": "ctx-memory",
             "description": "Local layered memory capture and grounding guidance for Claude Code.",
-            "version": "0.1.0",
+            "version": env!("CARGO_PKG_VERSION"),
             "author": {
                 "name": "ctx"
             }
