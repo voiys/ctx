@@ -6,6 +6,7 @@ use serde_json::{Map, Value, json};
 
 use crate::l1::{L1_EXTRACT_JOB_KIND, apply_l1_extract_result, l1_prompt_rules};
 use crate::l2::{L2_SCENE_JOB_KIND, apply_l2_scene_result, l2_prompt_rules};
+use crate::l3::{L3_PROFILE_JOB_KIND, apply_l3_profile_result, l3_prompt_rules};
 use crate::storage::ensure_db;
 use crate::util::{content_hash, stable_id, timestamp};
 
@@ -164,6 +165,13 @@ pub(crate) fn apply_memory_job_result(
             &job.evidence,
             &result,
         )?),
+        L3_PROFILE_JOB_KIND => Some(apply_l3_profile_result(
+            db_path,
+            project_root,
+            id,
+            &job.evidence,
+            &result,
+        )?),
         _ => None,
     };
     let now = timestamp();
@@ -275,6 +283,7 @@ fn prompt_for_job(job: &MemoryJobRecord) -> Result<String> {
     let layer_rules = match job.kind.as_str() {
         L1_EXTRACT_JOB_KIND => format!("\n{}\n", l1_prompt_rules()),
         L2_SCENE_JOB_KIND => format!("\n{}\n", l2_prompt_rules()),
+        L3_PROFILE_JOB_KIND => format!("\n{}\n", l3_prompt_rules()),
         _ => String::new(),
     };
     Ok(format!(

@@ -1580,6 +1580,127 @@ fn l2_enqueue_and_apply_materializes_scene_brief() {
 }
 
 #[test]
+fn l3_enqueue_and_apply_creates_profile_revision() {
+    let project = TestProject::new();
+
+    let memory = project
+        .ctx()
+        .arg("remember")
+        .arg("Deployment reviews use make check before handoff.")
+        .args([
+            "--kind",
+            "recipe",
+            "--subject",
+            "deployment.review",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let memory_id = first_toon_id(&memory);
+
+    let l2_job = project
+        .ctx()
+        .args(["memory", "l2", "enqueue", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let l2_job_id = first_toon_id(&l2_job);
+    let l2_result_path = project.root.path().join("l2-for-l3.json");
+    let l2_result = json!({
+        "scenes": [{
+            "action": "create",
+            "scene_name": "Deployment Review",
+            "summary": "Deployment review requires make check.",
+            "heat": 0.9,
+            "body_markdown": "## Deployment Review\n\nRun `make check` before handoff.",
+            "source_memory_ids": [memory_id],
+        }]
+    });
+    fs::write(&l2_result_path, serde_json::to_string(&l2_result).unwrap()).unwrap();
+    project
+        .ctx()
+        .args(["memory", "job", "apply", &l2_job_id])
+        .arg(&l2_result_path)
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let conn = Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let scene_id: String = conn
+        .query_row("SELECT id FROM scene_briefs", [], |row| row.get(0))
+        .unwrap();
+
+    let enqueue = project
+        .ctx()
+        .args(["memory", "l3", "enqueue", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let job_id = first_toon_id(&enqueue);
+    let enqueue = String::from_utf8(enqueue).unwrap();
+    assert!(enqueue.contains("kind: l3_profile"));
+    assert!(enqueue.contains("evidence_count: 1"));
+
+    let prompt = project
+        .ctx()
+        .args(["memory", "job", "prompt", &job_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prompt = String::from_utf8(prompt).unwrap();
+    assert!(prompt.contains("Build a compact profile"));
+    assert!(prompt.contains(&scene_id));
+
+    let l3_result_path = project.root.path().join("l3-result.json");
+    let l3_result = json!({
+        "summary": "Deployment handoffs require make check.",
+        "profile_markdown": "# Profile\n\n- Deployment reviews use `make check` before handoff.\n- Verify live repository evidence before treating this as current state.",
+        "source_scene_ids": [scene_id],
+    });
+    fs::write(&l3_result_path, serde_json::to_string(&l3_result).unwrap()).unwrap();
+    let applied = project
+        .ctx()
+        .args(["memory", "job", "apply", &job_id])
+        .arg(&l3_result_path)
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let applied = String::from_utf8(applied).unwrap();
+    assert!(applied.contains("l3_profile"));
+    assert!(applied.contains("version: 1"));
+
+    let row: (i64, String, String, String) = conn
+        .query_row(
+            "SELECT version, summary, profile_markdown, source_scene_ids_json FROM persona_profiles",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(row.0, 1);
+    assert_eq!(row.1, "Deployment handoffs require make check.");
+    assert!(row.2.contains("Verify live repository evidence"));
+    assert!(row.3.contains(&scene_id));
+}
+
+#[test]
 fn docs_crawl_recursively_indexes_linked_pages() {
     let site = FixtureSite::new(HashMap::from([
         (

@@ -127,6 +127,20 @@ pub(crate) fn ensure_db(path: &Path) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_scene_briefs_project_status
             ON scene_briefs(project_root, status, updated_at);
+        CREATE TABLE IF NOT EXISTS persona_profiles (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            project_root TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            summary TEXT NOT NULL,
+            profile_markdown TEXT NOT NULL,
+            source_scene_ids_json TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL DEFAULT 'active',
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_persona_profiles_project_status
+            ON persona_profiles(project_root, status, version);
         CREATE TABLE IF NOT EXISTS agent_sessions (
             id TEXT PRIMARY KEY,
             created_at TEXT NOT NULL,

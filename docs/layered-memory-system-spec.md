@@ -157,6 +157,7 @@ ctx memory review --cwd <repo>
 ctx memory accept <candidate-id> --cwd <repo>
 ctx memory reject <candidate-id> --cwd <repo>
 ctx memory l2 enqueue --cwd <repo>
+ctx memory l3 enqueue --cwd <repo>
 ctx memory brief "<task>" --cwd <repo>
 ctx hook recall "<task or latest user turn>" --cwd <repo>
 

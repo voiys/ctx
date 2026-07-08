@@ -25,6 +25,7 @@ use crate::jobs::{
 use crate::journal::{HookEventInput, ingest_hook_event};
 use crate::l1::{L1_EXTRACT_JOB_KIND, l1_extract_result_schema, recent_l0_evidence};
 use crate::l2::{L2_SCENE_JOB_KIND, l2_scene_result_schema, recent_l1_memory_evidence};
+use crate::l3::{L3_PROFILE_JOB_KIND, l3_profile_result_schema, recent_l2_scene_evidence};
 use crate::manifest::{
     allowed_resource_ids, find_manifest_resource, find_manifest_resource_index, read_manifest,
     upsert_manifest_resource, write_manifest,
@@ -324,6 +325,11 @@ enum MemoryCommands {
         #[command(subcommand)]
         command: MemoryL2Commands,
     },
+    /// Queue L3 profile updates from active L2 scene briefs.
+    L3 {
+        #[command(subcommand)]
+        command: MemoryL3Commands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -383,6 +389,17 @@ enum MemoryL2Commands {
     /// Queue an L2 scene brief job from active L1 memories.
     Enqueue {
         #[arg(long, default_value_t = 50)]
+        limit: usize,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryL3Commands {
+    /// Queue an L3 profile revision job from active L2 scenes.
+    Enqueue {
+        #[arg(long, default_value_t = 20)]
         limit: usize,
         #[arg(long)]
         cwd: Option<PathBuf>,
@@ -541,6 +558,9 @@ pub fn run() -> Result<()> {
             },
             MemoryCommands::L2 { command } => match command {
                 MemoryL2Commands::Enqueue { limit, cwd } => memory_l2_enqueue(cwd, limit),
+            },
+            MemoryCommands::L3 { command } => match command {
+                MemoryL3Commands::Enqueue { limit, cwd } => memory_l3_enqueue(cwd, limit),
             },
         },
         Commands::Hook { command } => match command {
@@ -980,6 +1000,37 @@ fn memory_l2_enqueue(cwd: Option<PathBuf>, limit: usize) -> Result<()> {
     }
     print_toon(CommandStatus {
         command: "memory l2 enqueue",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_l3_enqueue(cwd: Option<PathBuf>, limit: usize) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let project_root = app.paths.project_root.display().to_string();
+    let evidence = recent_l2_scene_evidence(&app.paths.db_path, &project_root, limit)?;
+    if evidence.is_empty() {
+        bail!("no active L2 scene briefs available for L3 profile generation");
+    }
+    let evidence_count = evidence.len();
+    let mut result = enqueue_memory_job(
+        &app.paths.db_path,
+        MemoryJobInput {
+            project_root,
+            session_id: None,
+            kind: L3_PROFILE_JOB_KIND.to_string(),
+            objective: "Create a compact L3 profile revision from active L2 scene briefs."
+                .to_string(),
+            evidence: Value::Array(evidence),
+            result_schema: l3_profile_result_schema(),
+        },
+    )?;
+    if let Some(object) = result.as_object_mut() {
+        object.insert("evidence_count".to_string(), json!(evidence_count));
+    }
+    print_toon(CommandStatus {
+        command: "memory l3 enqueue",
         status: "ok",
         result,
     })

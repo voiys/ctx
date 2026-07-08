@@ -102,10 +102,11 @@ make check
   - Add scene brief schema/materialization and structured scene update jobs.
   - Validate create/update/merge/archive operations with golden fixtures.
   - Implemented `ctx memory l2 enqueue` from active L1 memories.
-- [ ] C05: L3 profile
+- [x] C05: L3 profile
   - Add profile revision schema and changed-scene profile update jobs.
   - Validate profile provenance, budget behavior, and no override of live repo
     evidence.
+  - Implemented `ctx memory l3 enqueue` from active L2 scene briefs.
 - [ ] C06: Offload and Mermaid
   - Add offload node/blob storage, graph rendering, drill-down commands, and
     compact active task graph injection.
