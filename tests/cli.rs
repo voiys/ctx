@@ -1336,17 +1336,33 @@ fn hook_install_global_writes_marketplaces_and_guidance_fallback() {
             .exists()
     );
     assert!(
-        home.join("plugin-marketplaces/codex/plugins/ctx-memory/.codex-plugin/plugin.json")
+        home.join("plugin-marketplaces/codex/.codex-plugin/plugin.json")
             .exists()
     );
-    let codex_plugin_json: Value = serde_json::from_str(
+    let codex_marketplace_json: Value = serde_json::from_str(
         &fs::read_to_string(
-            home.join("plugin-marketplaces/codex/plugins/ctx-memory/.codex-plugin/plugin.json"),
+            home.join("plugin-marketplaces/codex/.agents/plugins/marketplace.json"),
         )
         .unwrap(),
     )
     .unwrap();
-    assert!(codex_plugin_json.get("hooks").is_none());
+    assert_eq!(
+        codex_marketplace_json["plugins"][0]["source"]["source"].as_str(),
+        Some("local")
+    );
+    assert_eq!(
+        codex_marketplace_json["plugins"][0]["source"]["path"].as_str(),
+        Some("./")
+    );
+    let codex_plugin_json: Value = serde_json::from_str(
+        &fs::read_to_string(home.join("plugin-marketplaces/codex/.codex-plugin/plugin.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        codex_plugin_json["hooks"].as_str(),
+        Some("./.codex-plugin/hooks.json")
+    );
     assert_eq!(codex_plugin_json["author"]["name"], "ctx");
     assert!(codex_plugin_json["interface"]["capabilities"].is_array());
     assert!(

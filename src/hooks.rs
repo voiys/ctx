@@ -225,6 +225,7 @@ fn install_codex_plugin_assets(plugin_dir: &Path) -> Result<PathBuf> {
                 "name": "ctx"
             },
             "skills": "./skills/",
+            "hooks": "./.codex-plugin/hooks.json",
             "interface": {
                 "displayName": "ctx Memory",
                 "shortDescription": "Local ctx memory capture and prompt grounding.",
@@ -299,7 +300,10 @@ fn install_global_marketplace(ctx_home: &Path, host: &str) -> Result<Marketplace
 
 fn global_marketplace_paths(ctx_home: &Path, host: &str) -> MarketplacePaths {
     let root = ctx_home.join("plugin-marketplaces").join(host);
-    let plugin_dir = root.join("plugins").join("ctx-memory");
+    let plugin_dir = match host {
+        "codex" => root.clone(),
+        _ => root.join("plugins").join("ctx-memory"),
+    };
     let manifest_path = match host {
         "claude" => root.join(".claude-plugin").join("marketplace.json"),
         _ => root
@@ -339,7 +343,7 @@ fn write_codex_marketplace(root: &Path) -> Result<()> {
                     "name": "ctx-memory",
                     "source": {
                         "source": "local",
-                        "path": "./plugins/ctx-memory"
+                        "path": "./"
                     },
                     "policy": {
                         "installation": "AVAILABLE",
