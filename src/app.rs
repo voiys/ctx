@@ -1,12 +1,13 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use url::Url;
 
 use crate::agents::upsert_agents_block;
@@ -15,20 +16,35 @@ use crate::constants::{
     DEFAULT_BUDGET_TOKENS, DEFAULT_CRAWL_CONCURRENCY, DEFAULT_MAX_PAGES, DEFAULT_TOP_K,
 };
 use crate::context::AppContext;
+use crate::hooks::{
+    doctor_global_hook_assets, doctor_hook_assets, hook_context, install_global_hook_assets,
+    install_hook_assets,
+};
 use crate::input::resolve_input;
-use crate::install::install;
+use crate::install::{default_install_status, install};
+use crate::jobs::{
+    MemoryJobInput, apply_memory_job_result, claim_next_memory_job, enqueue_memory_job, job_json,
+    memory_job_prompt,
+};
+use crate::journal::{HookEventInput, ingest_hook_event};
+use crate::l1::{L1_EXTRACT_JOB_KIND, l1_extract_result_schema, recent_l0_evidence};
+use crate::l2::{L2_SCENE_JOB_KIND, l2_scene_result_schema, recent_l1_memory_evidence};
+use crate::l3::{L3_PROFILE_JOB_KIND, l3_profile_result_schema, recent_l2_scene_evidence};
 use crate::manifest::{
     allowed_resource_ids, find_manifest_resource, find_manifest_resource_index, read_manifest,
     upsert_manifest_resource, write_manifest,
 };
 use crate::memory::{
-    RememberInput, ResolvedMemoryScope, export_memories, forget_memory, list_memories,
-    recall as recall_memories, remember as remember_memory, show_memory,
+    RememberInput, ResolvedMemoryScope, accept_memory, export_memories, forget_memory,
+    list_memories, mark_recall_results_used, recall as recall_memories,
+    recall_without_marking as recall_memories_without_marking, reject_memory,
+    remember as remember_memory, show_memory,
 };
 use crate::models::{
     CommandStatus, Defaults, Manifest, MemoryKind, MemoryScope, MemoryStatus, QueryKind,
     ResearchPaperRegistry, ResolvedInput, Resource, ResourceKind, SnapshotMetadata, SnapshotPage,
 };
+use crate::offload::{OffloadNodeInput, create_offload_node, offload_graph, show_offload_node};
 use crate::output::print_toon;
 use crate::retrieve::query_index;
 use crate::snapshot::{snapshot_docs, snapshot_notes, write_snapshot_pages};
@@ -55,6 +71,7 @@ const AGENT_HELP: &str = "Agent quick start:
   ctx query \"<question>\" --cwd <repo>
   ctx query \"<question>\" --label <docs-label> --cwd <repo>
   ctx remember \"<durable lesson>\" --kind fact --subject <topic> --scope project --cwd <repo>
+  Before final responses, store durable preferences, decisions, workflows, root causes, or verification rules with ctx remember.
 
 Gotchas:
   Always pass --cwd for the repo you mean.
@@ -163,6 +180,16 @@ enum Commands {
     Memory {
         #[command(subcommand)]
         command: MemoryCommands,
+    },
+    /// Ingest and process agent hook events.
+    Hook {
+        #[command(subcommand)]
+        command: HookCommands,
+    },
+    /// Store and inspect offloaded payload nodes.
+    Offload {
+        #[command(subcommand)]
+        command: OffloadCommands,
     },
     /// Export personal memories and notes.
     Export {
@@ -276,6 +303,206 @@ enum MemoryCommands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
+    /// Promote a suggested memory to active.
+    Accept {
+        id: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Reject a suggested memory.
+    Reject {
+        id: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Manage visible harness-executed memory jobs.
+    Job {
+        #[command(subcommand)]
+        command: MemoryJobCommands,
+    },
+    /// Claim the next memory job and print its prompt for the current harness.
+    Process {
+        #[arg(long)]
+        lease_owner: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Queue L1 extraction from recent redacted hook events.
+    L1 {
+        #[command(subcommand)]
+        command: MemoryL1Commands,
+    },
+    /// Queue L2 scene brief updates from accepted L1 memories.
+    L2 {
+        #[command(subcommand)]
+        command: MemoryL2Commands,
+    },
+    /// Queue L3 profile updates from active L2 scene briefs.
+    L3 {
+        #[command(subcommand)]
+        command: MemoryL3Commands,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryJobCommands {
+    /// Queue a memory job for a visible agent harness to process.
+    Enqueue {
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        objective: String,
+        #[arg(long)]
+        evidence_json: Option<String>,
+        #[arg(long)]
+        result_schema_json: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Claim the oldest pending memory job for this project.
+    Next {
+        #[arg(long)]
+        lease_owner: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Print the full processing prompt for a memory job.
+    Prompt {
+        id: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Validate and apply a memory job result.
+    Apply {
+        id: String,
+        result: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryL1Commands {
+    /// Queue an L1 extraction job from recent L0 hook events.
+    Enqueue {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryL2Commands {
+    /// Queue an L2 scene brief job from active L1 memories.
+    Enqueue {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryL3Commands {
+    /// Queue an L3 profile revision job from active L2 scenes.
+    Enqueue {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum HookCommands {
+    /// Install project hook assets for an agent host.
+    Install {
+        host: String,
+        #[arg(long)]
+        global: bool,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Check project hook assets.
+    Doctor {
+        #[arg(long)]
+        global: bool,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Store one normalized hook event from stdin.
+    Ingest {
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        event: String,
+        #[arg(long)]
+        session_key: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Handle one host lifecycle hook from stdin and return host-compatible hook output.
+    Handle {
+        #[arg(long)]
+        host: String,
+        #[arg(long, default_value_t = DEFAULT_TOP_K)]
+        top_k: usize,
+        #[arg(long, default_value_t = DEFAULT_BUDGET_TOKENS)]
+        budget: usize,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Recall bounded memory context for hook-time prompt injection.
+    Recall {
+        question: String,
+        #[arg(long, default_value_t = DEFAULT_TOP_K)]
+        top_k: usize,
+        #[arg(long, default_value_t = DEFAULT_BUDGET_TOKENS)]
+        budget: usize,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum OffloadCommands {
+    /// Add an offload node, optionally storing file content as a blob.
+    Add {
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        summary: Option<String>,
+        #[arg(long)]
+        content_file: Option<PathBuf>,
+        #[arg(long)]
+        media_type: Option<String>,
+        #[arg(long)]
+        parent: Option<String>,
+        #[arg(long)]
+        edge_kind: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Show one offload node.
+    Show {
+        id: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Render the project offload graph as Mermaid.
+    Graph {
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
 }
 
 pub fn run() -> Result<()> {
@@ -371,6 +598,88 @@ pub fn run() -> Result<()> {
                 cwd,
             } => memory_review(cwd, scope, scope_key),
             MemoryCommands::Forget { id, cwd } => memory_forget(cwd, &id),
+            MemoryCommands::Accept { id, cwd } => memory_accept(cwd, &id),
+            MemoryCommands::Reject { id, cwd } => memory_reject(cwd, &id),
+            MemoryCommands::Job { command } => match command {
+                MemoryJobCommands::Enqueue {
+                    kind,
+                    objective,
+                    evidence_json,
+                    result_schema_json,
+                    session_id,
+                    cwd,
+                } => memory_job_enqueue(
+                    cwd,
+                    kind,
+                    objective,
+                    evidence_json,
+                    result_schema_json,
+                    session_id,
+                ),
+                MemoryJobCommands::Next { lease_owner, cwd } => memory_job_next(cwd, lease_owner),
+                MemoryJobCommands::Prompt { id, cwd } => memory_job_prompt_command(cwd, &id),
+                MemoryJobCommands::Apply { id, result, cwd } => memory_job_apply(cwd, &id, &result),
+            },
+            MemoryCommands::Process { lease_owner, cwd } => memory_process(cwd, lease_owner),
+            MemoryCommands::L1 { command } => match command {
+                MemoryL1Commands::Enqueue {
+                    limit,
+                    session_id,
+                    cwd,
+                } => memory_l1_enqueue(cwd, limit, session_id),
+            },
+            MemoryCommands::L2 { command } => match command {
+                MemoryL2Commands::Enqueue { limit, cwd } => memory_l2_enqueue(cwd, limit),
+            },
+            MemoryCommands::L3 { command } => match command {
+                MemoryL3Commands::Enqueue { limit, cwd } => memory_l3_enqueue(cwd, limit),
+            },
+        },
+        Commands::Hook { command } => match command {
+            HookCommands::Install { host, global, cwd } => hook_install(cwd, &host, global),
+            HookCommands::Doctor { global, cwd } => hook_doctor(cwd, global),
+            HookCommands::Ingest {
+                host,
+                event,
+                session_key,
+                session_id,
+                cwd,
+            } => hook_ingest(cwd, host, event, session_key, session_id),
+            HookCommands::Handle {
+                host,
+                top_k,
+                budget,
+                cwd,
+            } => hook_handle(cwd, host, top_k, budget),
+            HookCommands::Recall {
+                question,
+                top_k,
+                budget,
+                cwd,
+            } => hook_recall(cwd, &question, top_k, budget),
+        },
+        Commands::Offload { command } => match command {
+            OffloadCommands::Add {
+                kind,
+                title,
+                summary,
+                content_file,
+                media_type,
+                parent,
+                edge_kind,
+                cwd,
+            } => offload_add(OffloadAddCommand {
+                cwd,
+                kind,
+                title,
+                summary,
+                content_file,
+                media_type,
+                parent,
+                edge_kind,
+            }),
+            OffloadCommands::Show { id, cwd } => offload_show(cwd, &id),
+            OffloadCommands::Graph { cwd } => offload_graph_command(cwd),
         },
         Commands::Export { path, cwd } => export_personal(cwd, &path),
         Commands::Import { path, cwd } => import_personal(cwd, &path),
@@ -431,6 +740,17 @@ struct QueryCommand {
     debug: bool,
     label: Option<String>,
     kind: Option<QueryKind>,
+}
+
+struct OffloadAddCommand {
+    cwd: Option<PathBuf>,
+    kind: String,
+    title: String,
+    summary: Option<String>,
+    content_file: Option<PathBuf>,
+    media_type: Option<String>,
+    parent: Option<String>,
+    edge_kind: Option<String>,
 }
 
 const PERSONAL_EXPORT_KIND: &str = "ctx_personal_export";
@@ -583,6 +903,927 @@ fn memory_forget(cwd: Option<PathBuf>, id: &str) -> Result<()> {
     let result = forget_memory(&app.paths.db_path, id, &scopes)?;
     print_toon(CommandStatus {
         command: "memory forget",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_accept(cwd: Option<PathBuf>, id: &str) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let scopes = recall_scopes(&app.paths, None, None)?;
+    let result = accept_memory(&app.paths.db_path, id, &scopes)?;
+    print_toon(CommandStatus {
+        command: "memory accept",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_reject(cwd: Option<PathBuf>, id: &str) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let scopes = recall_scopes(&app.paths, None, None)?;
+    let result = reject_memory(&app.paths.db_path, id, &scopes)?;
+    print_toon(CommandStatus {
+        command: "memory reject",
+        status: "ok",
+        result,
+    })
+}
+
+fn hook_install(cwd: Option<PathBuf>, host: &str, global: bool) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let hosts = hook_install_hosts(host)?;
+    let result = if hosts.len() == 1 {
+        if global {
+            install_global_hook_assets(&app.paths.home, hosts[0])?
+        } else {
+            install_hook_assets(&app.paths.project_root, hosts[0])?
+        }
+    } else {
+        let hosts = hosts
+            .into_iter()
+            .map(|host| {
+                if global {
+                    install_global_hook_assets(&app.paths.home, host)
+                } else {
+                    install_hook_assets(&app.paths.project_root, host)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        json!({
+            "scope": if global { "global" } else { "project" },
+            "hosts": hosts,
+            "background_execution": false,
+        })
+    };
+    print_toon(CommandStatus {
+        command: "hook install",
+        status: "ok",
+        result,
+    })
+}
+
+fn hook_doctor(cwd: Option<PathBuf>, global: bool) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let result = if global {
+        doctor_global_hook_assets(&app.paths.home)?
+    } else {
+        doctor_hook_assets(&app.paths.project_root)?
+    };
+    print_toon(CommandStatus {
+        command: "hook doctor",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_job_enqueue(
+    cwd: Option<PathBuf>,
+    kind: String,
+    objective: String,
+    evidence_json: Option<String>,
+    result_schema_json: Option<String>,
+    session_id: Option<String>,
+) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let evidence = parse_json_arg_or_default("evidence-json", evidence_json, json!([]))?;
+    let result_schema = parse_json_arg_or_default(
+        "result-schema-json",
+        result_schema_json,
+        json!({"type": "object"}),
+    )?;
+    let result = enqueue_memory_job(
+        &app.paths.db_path,
+        MemoryJobInput {
+            project_root: app.paths.project_root.display().to_string(),
+            session_id,
+            kind,
+            objective,
+            evidence,
+            result_schema,
+        },
+    )?;
+    print_toon(CommandStatus {
+        command: "memory job enqueue",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_job_next(cwd: Option<PathBuf>, lease_owner: Option<String>) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let job = claim_next_memory_job(
+        &app.paths.db_path,
+        &app.paths.project_root.display().to_string(),
+        lease_owner.as_deref(),
+    )?
+    .map(|job| job_json(&job));
+    print_toon(CommandStatus {
+        command: "memory job next",
+        status: "ok",
+        result: json!({
+            "job": job,
+        }),
+    })
+}
+
+fn memory_job_prompt_command(cwd: Option<PathBuf>, id: &str) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let result = memory_job_prompt(
+        &app.paths.db_path,
+        &app.paths.project_root.display().to_string(),
+        id,
+    )?;
+    print_toon(CommandStatus {
+        command: "memory job prompt",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_job_apply(cwd: Option<PathBuf>, id: &str, result_arg: &str) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let result_json = read_job_result_arg(result_arg)?;
+    let result = apply_memory_job_result(
+        &app.paths.db_path,
+        &app.paths.project_root.display().to_string(),
+        id,
+        result_json,
+    )?;
+    print_toon(CommandStatus {
+        command: "memory job apply",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_process(cwd: Option<PathBuf>, lease_owner: Option<String>) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let project_root = app.paths.project_root.display().to_string();
+    let Some(job) =
+        claim_next_memory_job(&app.paths.db_path, &project_root, lease_owner.as_deref())?
+    else {
+        return print_toon(CommandStatus {
+            command: "memory process",
+            status: "ok",
+            result: json!({
+                "job": Value::Null,
+            }),
+        });
+    };
+    let claimed = job_json(&job);
+    let id = claimed["id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("claimed memory job has no id"))?;
+    let prompt = memory_job_prompt(&app.paths.db_path, &project_root, id)?;
+    print_toon(CommandStatus {
+        command: "memory process",
+        status: "ok",
+        result: json!({
+            "job": claimed,
+            "prompt": prompt["prompt"],
+            "result_schema": prompt["result_schema"],
+            "execution": {
+                "mode": "visible_harness",
+                "background": false,
+                "apply_command": format!("ctx memory job apply {id} <result.json> --cwd {}", project_root),
+            },
+        }),
+    })
+}
+
+fn memory_l1_enqueue(cwd: Option<PathBuf>, limit: usize, session_id: Option<String>) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let project_root = app.paths.project_root.display().to_string();
+    let evidence = recent_l0_evidence(
+        &app.paths.db_path,
+        &project_root,
+        session_id.as_deref(),
+        limit,
+    )?;
+    if evidence.is_empty() {
+        bail!("no L0 hook evidence available for L1 extraction");
+    }
+    let evidence_count = evidence.len();
+    let mut result = enqueue_memory_job(
+        &app.paths.db_path,
+        MemoryJobInput {
+            project_root,
+            session_id,
+            kind: L1_EXTRACT_JOB_KIND.to_string(),
+            objective: "Extract review-gated L1 memory candidates from recent hook events."
+                .to_string(),
+            evidence: Value::Array(evidence),
+            result_schema: l1_extract_result_schema(),
+        },
+    )?;
+    if let Some(object) = result.as_object_mut() {
+        object.insert("evidence_count".to_string(), json!(evidence_count));
+    }
+    print_toon(CommandStatus {
+        command: "memory l1 enqueue",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_l2_enqueue(cwd: Option<PathBuf>, limit: usize) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let project_root = app.paths.project_root.display().to_string();
+    let evidence = recent_l1_memory_evidence(&app.paths.db_path, &project_root, limit)?;
+    if evidence.is_empty() {
+        bail!("no active L1 memories available for L2 scene extraction");
+    }
+    let evidence_count = evidence.len();
+    let mut result = enqueue_memory_job(
+        &app.paths.db_path,
+        MemoryJobInput {
+            project_root,
+            session_id: None,
+            kind: L2_SCENE_JOB_KIND.to_string(),
+            objective: "Create or update compact L2 scene briefs from active L1 memories."
+                .to_string(),
+            evidence: Value::Array(evidence),
+            result_schema: l2_scene_result_schema(),
+        },
+    )?;
+    if let Some(object) = result.as_object_mut() {
+        object.insert("evidence_count".to_string(), json!(evidence_count));
+    }
+    print_toon(CommandStatus {
+        command: "memory l2 enqueue",
+        status: "ok",
+        result,
+    })
+}
+
+fn memory_l3_enqueue(cwd: Option<PathBuf>, limit: usize) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let project_root = app.paths.project_root.display().to_string();
+    let evidence = recent_l2_scene_evidence(&app.paths.db_path, &project_root, limit)?;
+    if evidence.is_empty() {
+        bail!("no active L2 scene briefs available for L3 profile generation");
+    }
+    let evidence_count = evidence.len();
+    let mut result = enqueue_memory_job(
+        &app.paths.db_path,
+        MemoryJobInput {
+            project_root,
+            session_id: None,
+            kind: L3_PROFILE_JOB_KIND.to_string(),
+            objective: "Create a compact L3 profile revision from active L2 scene briefs."
+                .to_string(),
+            evidence: Value::Array(evidence),
+            result_schema: l3_profile_result_schema(),
+        },
+    )?;
+    if let Some(object) = result.as_object_mut() {
+        object.insert("evidence_count".to_string(), json!(evidence_count));
+    }
+    print_toon(CommandStatus {
+        command: "memory l3 enqueue",
+        status: "ok",
+        result,
+    })
+}
+
+fn parse_json_arg_or_default(name: &str, raw: Option<String>, default: Value) -> Result<Value> {
+    let Some(raw) = raw else {
+        return Ok(default);
+    };
+    serde_json::from_str::<Value>(&raw).with_context(|| format!("failed to parse --{name}"))
+}
+
+fn read_job_result_arg(result_arg: &str) -> Result<Value> {
+    let raw = if result_arg == "-" {
+        let mut raw = String::new();
+        io::stdin()
+            .read_to_string(&mut raw)
+            .context("failed to read memory job result JSON from stdin")?;
+        raw
+    } else if result_arg.trim_start().starts_with('{') || result_arg.trim_start().starts_with('[') {
+        result_arg.to_string()
+    } else {
+        fs::read_to_string(result_arg)
+            .with_context(|| format!("failed to read memory job result {}", result_arg))?
+    };
+    if raw.trim().is_empty() {
+        bail!("memory job result JSON is empty");
+    }
+    serde_json::from_str::<Value>(&raw).context("failed to parse memory job result JSON")
+}
+
+fn hook_ingest(
+    cwd: Option<PathBuf>,
+    host: String,
+    event_name: String,
+    session_key: Option<String>,
+    session_id: Option<String>,
+) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let mut raw = String::new();
+    io::stdin()
+        .read_to_string(&mut raw)
+        .context("failed to read hook JSON from stdin")?;
+    if raw.trim().is_empty() {
+        bail!("hook ingest requires JSON on stdin");
+    }
+    let payload = serde_json::from_str(&raw).context("failed to parse hook JSON from stdin")?;
+    let result = ingest_hook_event(
+        &app.paths.db_path,
+        HookEventInput {
+            host,
+            event_name,
+            project_root: app.paths.project_root.display().to_string(),
+            session_key,
+            session_id,
+            payload,
+        },
+    )?;
+    print_toon(CommandStatus {
+        command: "hook ingest",
+        status: "ok",
+        result,
+    })
+}
+
+fn hook_handle(cwd: Option<PathBuf>, host: String, top_k: usize, budget: usize) -> Result<()> {
+    if budget == 0 {
+        bail!("hook handle budget must be greater than zero");
+    }
+    let host = normalize_hook_host(&host)?;
+    let mut raw = String::new();
+    io::stdin()
+        .read_to_string(&mut raw)
+        .context("failed to read hook JSON from stdin")?;
+    if raw.trim().is_empty() {
+        bail!("hook handle requires JSON on stdin");
+    }
+    let payload = serde_json::from_str::<Value>(&raw).context("failed to parse hook JSON")?;
+    let hook_cwd = cwd.or_else(|| json_string(&payload, "cwd").map(PathBuf::from));
+    let app = AppContext::load(hook_cwd)?;
+    app.ensure_global_storage()?;
+
+    let event_name = json_string(&payload, "hook_event_name")
+        .or_else(|| env::var("CTX_HOOK_EVENT").ok())
+        .or_else(|| env::var("CLAUDE_HOOK_EVENT_NAME").ok())
+        .or_else(|| env::var("CODEX_HOOK_EVENT_NAME").ok())
+        .unwrap_or_else(|| "unknown".to_string());
+    let session_key = json_string(&payload, "session_id")
+        .or_else(|| env::var("CTX_SESSION_KEY").ok())
+        .or_else(|| env::var("CLAUDE_SESSION_ID").ok())
+        .or_else(|| env::var("CODEX_SESSION_ID").ok());
+    let session_id = json_string(&payload, "turn_id")
+        .or_else(|| json_string(&payload, "tool_use_id"))
+        .or_else(|| json_string(&payload, "agent_id"));
+
+    ingest_hook_event(
+        &app.paths.db_path,
+        HookEventInput {
+            host: host.clone(),
+            event_name: event_name.clone(),
+            project_root: app.paths.project_root.display().to_string(),
+            session_key,
+            session_id,
+            payload: payload.clone(),
+        },
+    )?;
+
+    if should_inject_hook_context(&event_name) {
+        let question = json_string(&payload, "prompt").unwrap_or_default();
+        let packed_context = if question.trim().is_empty() {
+            String::new()
+        } else {
+            let scopes = recall_scopes(&app.paths, None, None)?;
+            let memories = recall_memories_without_marking(
+                &app.paths.db_path,
+                &question,
+                &scopes,
+                hook_recall_candidate_limit(top_k),
+            )?;
+            let (packed_context, selected_l1, _) =
+                pack_l1_context(&memories, budget, &question, top_k);
+            mark_recall_results_used(&app.paths.db_path, &selected_l1)?;
+            packed_context
+        };
+        let context = hook_context(
+            &app.paths.project_root,
+            &app.paths.home,
+            Some(&packed_context),
+        )?;
+        let output = json!({
+            "hookSpecificOutput": {
+                "hookEventName": event_name,
+                "additionalContext": context,
+            }
+        });
+        println!("{}", serde_json::to_string(&output)?);
+    }
+
+    Ok(())
+}
+
+fn hook_recall(cwd: Option<PathBuf>, question: &str, top_k: usize, budget: usize) -> Result<()> {
+    if budget == 0 {
+        bail!("hook recall budget must be greater than zero");
+    }
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let scopes = recall_scopes(&app.paths, None, None)?;
+    let memories = recall_memories_without_marking(
+        &app.paths.db_path,
+        question,
+        &scopes,
+        hook_recall_candidate_limit(top_k),
+    )?;
+    let (packed_context, selected_l1, estimated_tokens) =
+        pack_l1_context(&memories, budget, question, top_k);
+    mark_recall_results_used(&app.paths.db_path, &selected_l1)?;
+    print_toon(CommandStatus {
+        command: "hook recall",
+        status: "ok",
+        result: json!({
+            "question": question,
+            "top_k": top_k,
+            "budget_tokens": budget,
+            "estimated_tokens": estimated_tokens,
+            "packed_context": packed_context,
+            "layers": {
+                "l1": selected_l1,
+                "l2_scene_briefs": Vec::<Value>::new(),
+                "l3_profile": Value::Null,
+                "offload": Vec::<Value>::new(),
+            },
+        }),
+    })
+}
+
+fn normalize_hook_host(host: &str) -> Result<String> {
+    match host.to_ascii_lowercase().as_str() {
+        "codex" => Ok("codex".to_string()),
+        "claude" | "claude-code" | "claude_code" => Ok("claude".to_string()),
+        other => bail!("unsupported hook host: {other}"),
+    }
+}
+
+fn hook_install_hosts(host: &str) -> Result<Vec<&'static str>> {
+    if host.eq_ignore_ascii_case("all") {
+        Ok(vec!["codex", "claude"])
+    } else {
+        Ok(vec![match normalize_hook_host(host)?.as_str() {
+            "codex" => "codex",
+            "claude" => "claude",
+            other => bail!("unsupported hook host: {other}"),
+        }])
+    }
+}
+
+fn json_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn should_inject_hook_context(event_name: &str) -> bool {
+    matches!(event_name, "SessionStart" | "UserPromptSubmit")
+}
+
+const HOOK_RECALL_CANDIDATE_FLOOR: usize = 25;
+
+fn hook_recall_candidate_limit(top_k: usize) -> usize {
+    top_k.max(HOOK_RECALL_CANDIDATE_FLOOR)
+}
+
+fn pack_l1_context(
+    memories: &[Value],
+    budget_tokens: usize,
+    query: &str,
+    max_items: usize,
+) -> (String, Vec<Value>, usize) {
+    if max_items == 0 {
+        return (String::new(), Vec::new(), 0);
+    }
+    let query_terms = hook_recall_terms(query);
+    let mut selected = Vec::new();
+    let mut entries = Vec::new();
+    let mut used_tokens = 0usize;
+    for item in memories {
+        if !memory_relevant_for_hook(item, &query_terms) {
+            continue;
+        }
+        let Some(memory) = item.get("memory") else {
+            continue;
+        };
+        let kind = memory
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("memory");
+        let subject = memory
+            .get("subject")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let content = memory.get("content").and_then(Value::as_str).unwrap_or("");
+        if content.trim().is_empty() {
+            continue;
+        }
+        let mut entry = format!("- [{kind}:{subject}] {content}");
+        let mut entry_tokens = estimate_tokens(&entry);
+        if used_tokens + entry_tokens > budget_tokens {
+            if selected.is_empty() {
+                entry = truncate_chars(&entry, budget_tokens.saturating_mul(4));
+                entry_tokens = estimate_tokens(&entry);
+            } else {
+                break;
+            }
+        }
+        used_tokens += entry_tokens;
+        entries.push(entry);
+        selected.push(item.clone());
+        if used_tokens >= budget_tokens || selected.len() >= max_items {
+            break;
+        }
+    }
+    if entries.is_empty() {
+        return (String::new(), selected, used_tokens);
+    }
+    (
+        format!(
+            "<ctx-memory layer=\"l1\">\n{}\n</ctx-memory>",
+            entries.join("\n")
+        ),
+        selected,
+        used_tokens,
+    )
+}
+
+fn memory_relevant_for_hook(item: &Value, query_terms: &BTreeSet<String>) -> bool {
+    if query_terms.is_empty() {
+        return false;
+    }
+    let Some(memory) = item.get("memory") else {
+        return false;
+    };
+
+    let mut anchor_terms = BTreeSet::new();
+    extend_terms_from_field(&mut anchor_terms, memory, "subject");
+    extend_terms_from_field(&mut anchor_terms, memory, "trigger");
+    extend_terms_from_tags(&mut anchor_terms, memory);
+    if term_overlap(query_terms, &anchor_terms) > 0 {
+        return true;
+    }
+
+    let mut body_terms = BTreeSet::new();
+    extend_terms_from_field(&mut body_terms, memory, "content");
+    extend_terms_from_evidence(&mut body_terms, item);
+    let body_overlap = term_overlap(query_terms, &body_terms);
+    let has_lexical_match = item
+        .get("evidence")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|evidence| {
+            evidence
+                .get("lexical_rank")
+                .and_then(Value::as_u64)
+                .is_some()
+        });
+    let scope = memory
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let lexical_overlap_threshold = if scope == "global" { 2 } else { 1 };
+    if has_lexical_match && body_overlap >= lexical_overlap_threshold {
+        return true;
+    }
+
+    let has_vector_match = item
+        .get("evidence")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|evidence| {
+            evidence
+                .get("vector_rank")
+                .and_then(Value::as_u64)
+                .is_some()
+        });
+    matches!(scope, "project" | "thread") && has_vector_match && body_overlap >= 2
+}
+
+fn extend_terms_from_field(terms: &mut BTreeSet<String>, value: &Value, field: &str) {
+    if let Some(text) = value.get(field).and_then(Value::as_str) {
+        terms.extend(hook_recall_terms(text));
+    }
+}
+
+fn extend_terms_from_tags(terms: &mut BTreeSet<String>, memory: &Value) {
+    if let Some(tags) = memory.get("tags").and_then(Value::as_array) {
+        for tag in tags.iter().filter_map(Value::as_str) {
+            terms.extend(hook_recall_terms(tag));
+        }
+    }
+}
+
+fn extend_terms_from_evidence(terms: &mut BTreeSet<String>, item: &Value) {
+    if let Some(evidence) = item.get("evidence").and_then(Value::as_array) {
+        for section in evidence {
+            extend_terms_from_field(terms, section, "plain_text");
+            extend_terms_from_field(terms, section, "markdown");
+        }
+    }
+}
+
+fn term_overlap(left: &BTreeSet<String>, right: &BTreeSet<String>) -> usize {
+    left.iter().filter(|term| right.contains(*term)).count()
+}
+
+fn hook_recall_terms(input: &str) -> BTreeSet<String> {
+    input
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter_map(normalize_hook_recall_term)
+        .collect()
+}
+
+fn normalize_hook_recall_term(raw: &str) -> Option<String> {
+    let mut term = raw.trim().to_ascii_lowercase();
+    if term.is_empty() {
+        return None;
+    }
+    if term.len() > 4 && term.ends_with("ies") {
+        term.truncate(term.len() - 3);
+        term.push('y');
+    } else if term.len() > 5 && term.ends_with("ing") {
+        term.truncate(term.len() - 3);
+    } else if term.len() > 4 && term.ends_with("ed") {
+        term.truncate(term.len() - 2);
+    } else if term.len() > 4 && term.ends_with("ly") {
+        term.truncate(term.len() - 2);
+    } else if term.len() > 3 && term.ends_with('s') && !term.ends_with("ss") {
+        term.truncate(term.len() - 1);
+    }
+    if is_hook_recall_stopword(&term) {
+        return None;
+    }
+    Some(term)
+}
+
+fn is_hook_recall_stopword(term: &str) -> bool {
+    matches!(
+        term,
+        "a" | "about"
+            | "after"
+            | "also"
+            | "already"
+            | "am"
+            | "an"
+            | "and"
+            | "any"
+            | "are"
+            | "as"
+            | "at"
+            | "be"
+            | "been"
+            | "before"
+            | "by"
+            | "can"
+            | "chat"
+            | "check"
+            | "could"
+            | "did"
+            | "do"
+            | "does"
+            | "done"
+            | "for"
+            | "from"
+            | "had"
+            | "has"
+            | "have"
+            | "how"
+            | "i"
+            | "if"
+            | "in"
+            | "into"
+            | "is"
+            | "it"
+            | "just"
+            | "last"
+            | "me"
+            | "message"
+            | "my"
+            | "of"
+            | "on"
+            | "or"
+            | "out"
+            | "please"
+            | "should"
+            | "that"
+            | "the"
+            | "this"
+            | "those"
+            | "to"
+            | "u"
+            | "ur"
+            | "use"
+            | "was"
+            | "we"
+            | "were"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "who"
+            | "why"
+            | "with"
+            | "would"
+            | "you"
+            | "your"
+    )
+}
+
+fn estimate_tokens(value: &str) -> usize {
+    value.chars().count().div_ceil(4).max(1)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut out = value.chars().take(keep).collect::<String>();
+    out.push_str("...");
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn hook_pack_filters_vector_only_global_memory_without_literal_anchor() {
+        let memories = vec![
+            json!({
+                "memory": {
+                    "scope": "global",
+                    "kind": "preference",
+                    "subject": "agent-instructions.no-op-test",
+                    "content": "When optimizing agent instructions or skills, apply the no-op test."
+                },
+                "evidence": [{
+                    "plain_text": "When optimizing agent instructions or skills, apply the no-op test.",
+                    "vector_rank": 1
+                }]
+            }),
+            json!({
+                "memory": {
+                    "scope": "global",
+                    "kind": "fact",
+                    "subject": "current-package-version-verification",
+                    "content": "For current/latest published versions of packages, libraries, runtimes, frameworks, CLIs, or platform components, verify live with the relevant registry or official source before answering."
+                },
+                "evidence": [{
+                    "plain_text": "For current/latest published versions of packages, verify live with the relevant registry.",
+                    "lexical_rank": 1,
+                    "vector_rank": 2
+                }]
+            }),
+        ];
+
+        let (packed, selected, _) =
+            pack_l1_context(&memories, 256, "which TypeScript is currently out?", 5);
+
+        assert!(packed.contains("current-package-version-verification"));
+        assert!(!packed.contains("agent-instructions.no-op-test"));
+        assert_eq!(selected.len(), 1);
+    }
+
+    #[test]
+    fn hook_pack_keeps_global_memory_when_prompt_matches_anchor() {
+        let memories = vec![json!({
+            "memory": {
+                "scope": "global",
+                "kind": "preference",
+                "subject": "agent-instructions.no-op-test",
+                "content": "When optimizing agent instructions or skills, apply the no-op test."
+            },
+            "evidence": [{
+                "plain_text": "When optimizing agent instructions or skills, apply the no-op test.",
+                "vector_rank": 1
+            }]
+        })];
+
+        let (packed, selected, _) = pack_l1_context(
+            &memories,
+            256,
+            "should these agent instructions pass the no-op test?",
+            5,
+        );
+
+        assert!(packed.contains("agent-instructions.no-op-test"));
+        assert_eq!(selected.len(), 1);
+    }
+
+    #[test]
+    fn hook_pack_filters_global_memory_with_only_generic_body_overlap() {
+        let memories = vec![json!({
+            "memory": {
+                "scope": "global",
+                "kind": "preference",
+                "subject": "agent-instructions.no-op-test",
+                "content": "When optimizing agent instructions or skills, apply the no-op test: keep only instructions that change behavior through a trigger, concrete action, output shape, threshold/check, command, fallback rule, or blocker/reporting requirement."
+            },
+            "evidence": [{
+                "plain_text": "When optimizing agent instructions or skills, apply the no-op test: keep only instructions that change behavior through a trigger, concrete action, output shape, threshold/check, command, fallback rule, or blocker/reporting requirement.",
+                "lexical_rank": 2,
+                "vector_rank": 5
+            }]
+        })];
+
+        let (packed, selected, _) = pack_l1_context(
+            &memories,
+            256,
+            "are the hooks already upgraded in this chat? u can check on ur last message",
+            5,
+        );
+
+        assert!(!packed.contains("agent-instructions.no-op-test"));
+        assert!(selected.is_empty());
+    }
+}
+
+fn offload_add(command: OffloadAddCommand) -> Result<()> {
+    let app = AppContext::load(command.cwd)?;
+    app.ensure_global_storage()?;
+    let content = command
+        .content_file
+        .as_ref()
+        .map(|path| {
+            fs::read_to_string(path)
+                .with_context(|| format!("failed to read offload content {}", path.display()))
+        })
+        .transpose()?;
+    let result = create_offload_node(
+        &app.paths.db_path,
+        &app.paths.home,
+        OffloadNodeInput {
+            project_root: app.paths.project_root.display().to_string(),
+            kind: command.kind,
+            title: command.title,
+            summary: command.summary,
+            content,
+            media_type: command.media_type,
+            parent_node_id: command.parent,
+            edge_kind: command.edge_kind,
+        },
+    )?;
+    print_toon(CommandStatus {
+        command: "offload add",
+        status: "ok",
+        result,
+    })
+}
+
+fn offload_show(cwd: Option<PathBuf>, id: &str) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let result = show_offload_node(
+        &app.paths.db_path,
+        &app.paths.project_root.display().to_string(),
+        id,
+    )?;
+    print_toon(CommandStatus {
+        command: "offload show",
+        status: "ok",
+        result,
+    })
+}
+
+fn offload_graph_command(cwd: Option<PathBuf>) -> Result<()> {
+    let app = AppContext::load(cwd)?;
+    app.ensure_global_storage()?;
+    let result = offload_graph(
+        &app.paths.db_path,
+        &app.paths.project_root.display().to_string(),
+    )?;
+    print_toon(CommandStatus {
+        command: "offload graph",
         status: "ok",
         result,
     })
@@ -1606,6 +2847,7 @@ fn doctor(cwd: Option<PathBuf>) -> Result<()> {
             "home": paths.home,
             "db_path": paths.db_path,
             "db_ok": db_ok,
+            "install": default_install_status()?,
             "project_resource_count": resource_count,
         }),
     })

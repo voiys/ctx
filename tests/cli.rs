@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use assert_cmd::Command;
+use rusqlite::Connection;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tiny_http::{Response, Server};
@@ -205,12 +206,21 @@ fn ctx_with_home(home: &Path) -> Command {
 }
 
 fn first_toon_id(stdout: &[u8]) -> String {
+    first_toon_field(stdout, "id")
+}
+
+fn first_toon_field(stdout: &[u8], field: &str) -> String {
     let stdout = String::from_utf8(stdout.to_vec()).unwrap();
+    let prefix = format!("{field}: ");
     stdout
         .lines()
-        .find_map(|line| line.trim().strip_prefix("id: "))
+        .find_map(|line| line.trim().strip_prefix(&prefix))
         .map(|value| value.trim_matches('"').to_string())
-        .unwrap_or_else(|| panic!("no id line in output:\n{stdout}"))
+        .unwrap_or_else(|| panic!("no {field} line in output:\n{stdout}"))
+}
+
+fn first_toon_usize(stdout: &[u8], field: &str) -> usize {
+    first_toon_field(stdout, field).parse().unwrap()
 }
 
 #[test]
@@ -255,7 +265,12 @@ fn init_writes_agents_block_with_memory_guidance() {
     assert!(agents.contains("Use `ctx` for this project's local context and operational memory."));
     assert!(agents.contains("ctx recall \"<task, repo, or failure pattern>\" --cwd <repo>"));
     assert!(agents.contains("ctx remember \"<concise reusable lesson>\""));
+    assert!(agents.contains("visible memory writeback check"));
     assert!(agents.contains("--suggested"));
+    assert!(agents.contains("ctx hook recall \"<latest user turn or task>\" --cwd <repo>"));
+    assert!(agents.contains("ctx memory process --cwd <repo>"));
+    assert!(agents.contains("ctx memory job apply <id> <result.json> --cwd <repo>"));
+    assert!(agents.contains("ctx offload graph --cwd <repo>"));
     assert!(agents.contains("ctx query \"<question>\" --cwd <repo>"));
 
     project
@@ -1005,6 +1020,1020 @@ fn suggested_memories_are_reviewable_but_not_recalled_by_default() {
 }
 
 #[test]
+fn memory_accept_reject_and_hook_recall_pack_active_context() {
+    let project = TestProject::new();
+
+    let suggested = project
+        .ctx()
+        .arg("remember")
+        .arg("When doing hook recall promotion, use COMPACT_SUMMARY_MODE.")
+        .args([
+            "--kind",
+            "preference",
+            "--subject",
+            "hook.recall",
+            "--suggested",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let memory_id = first_toon_id(&suggested);
+
+    let before = project
+        .ctx()
+        .args(["hook", "recall", "hook recall promotion", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let before = String::from_utf8(before).unwrap();
+    assert!(!before.contains("COMPACT_SUMMARY_MODE"));
+
+    let accepted = project
+        .ctx()
+        .args(["memory", "accept", &memory_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let accepted = String::from_utf8(accepted).unwrap();
+    assert!(accepted.contains("status: active"));
+    assert!(accepted.contains("confirmed_at:"));
+
+    let recall = project
+        .ctx()
+        .args([
+            "hook",
+            "recall",
+            "hook recall promotion",
+            "--budget",
+            "64",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recall = String::from_utf8(recall.clone()).unwrap();
+    assert!(recall.contains("COMPACT_SUMMARY_MODE"));
+    assert!(recall.contains("<ctx-memory layer=\\\"l1\\\">"));
+    assert!(recall.contains("l2_scene_briefs"));
+    assert!(first_toon_usize(recall.as_bytes(), "estimated_tokens") <= 64);
+
+    let tight = project
+        .ctx()
+        .args([
+            "hook",
+            "recall",
+            "hook recall promotion",
+            "--budget",
+            "4",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(first_toon_usize(&tight, "estimated_tokens") <= 4);
+
+    let rejected = project
+        .ctx()
+        .arg("remember")
+        .arg("Rejected candidate uses REJECTED_MODE.")
+        .args([
+            "--kind",
+            "fact",
+            "--subject",
+            "hook.reject",
+            "--suggested",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rejected_id = first_toon_id(&rejected);
+    project
+        .ctx()
+        .args(["memory", "reject", &rejected_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let review = project
+        .ctx()
+        .args(["memory", "review", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let review = String::from_utf8(review).unwrap();
+    assert!(!review.contains("REJECTED_MODE"));
+}
+
+#[test]
+fn hook_ingest_stores_redacted_event_without_project_init() {
+    let project = TestProject::new();
+
+    let output = project
+        .ctx()
+        .args([
+            "hook",
+            "ingest",
+            "--host",
+            "codex",
+            "--event",
+            "PostToolUse",
+            "--session-key",
+            "thread-123",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .write_stdin(r#"{"tool":"shell","api_key":"sk-test-secret","message":"hello hook"}"#)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("hook ingest"));
+    assert!(output.contains("queued_jobs: 0"));
+
+    let conn = Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let row: (String, String, String, String, String) = conn
+        .query_row(
+            "SELECT host, event_name, project_root, session_key, payload_json FROM hook_events",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(row.0, "codex");
+    assert_eq!(row.1, "PostToolUse");
+    assert_eq!(
+        row.2,
+        project
+            .root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .display()
+            .to_string()
+    );
+    assert_eq!(row.3, "thread-123");
+    assert!(row.4.contains("[redacted]"));
+    assert!(!row.4.contains("sk-test-secret"));
+
+    let session_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM agent_sessions", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(session_count, 1);
+}
+
+#[test]
+fn hook_install_writes_codex_and_claude_assets_without_background_execution() {
+    let project = TestProject::new();
+
+    let codex = project
+        .ctx()
+        .args(["hook", "install", "codex", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let codex = String::from_utf8(codex).unwrap();
+    assert!(codex.contains("host: codex"));
+    assert!(codex.contains("background_execution: false"));
+
+    project
+        .ctx()
+        .args(["hook", "install", "claude", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let hooks_dir = project.root.path().join(".ctx/hooks");
+    let codex_script = hooks_dir.join("codex-memory-hook.sh");
+    let claude_script = hooks_dir.join("claude-memory-hook.sh");
+    let codex_script_content = fs::read_to_string(&codex_script).unwrap();
+    let claude_script_content = fs::read_to_string(&claude_script).unwrap();
+    assert!(codex_script_content.contains("ctx hook handle"));
+    assert!(codex_script_content.contains("--host \"codex\""));
+    assert!(claude_script_content.contains("--host \"claude\""));
+    assert!(!codex_script_content.contains("memory process"));
+    assert!(hooks_dir.join("guidance.md").exists());
+
+    let codex_plugin = project.root.path().join(".ctx/plugins/codex");
+    let claude_plugin = project.root.path().join(".ctx/plugins/claude");
+    assert!(codex_plugin.join(".codex-plugin/plugin.json").exists());
+    assert!(codex_plugin.join(".codex-plugin/hooks.json").exists());
+    assert!(codex_plugin.join("bin/ctx-codex-hook.sh").exists());
+    assert!(claude_plugin.join(".claude-plugin/plugin.json").exists());
+    assert!(claude_plugin.join("hooks/hooks.json").exists());
+    assert!(claude_plugin.join("bin/ctx-claude-hook.sh").exists());
+
+    let doctor = project
+        .ctx()
+        .args(["hook", "doctor", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let doctor = String::from_utf8(doctor).unwrap();
+    assert!(doctor.contains("codex-memory-hook.sh"));
+    assert!(doctor.contains("claude-memory-hook.sh"));
+    assert!(doctor.contains("hosts[2]"));
+    assert!(doctor.contains("true,true"));
+    assert!(doctor.contains("plugin_exists"));
+    assert!(doctor.contains("background_execution: false"));
+}
+
+#[test]
+fn hook_handle_ingests_event_and_injects_grounding_context() {
+    let project = TestProject::new();
+    project
+        .ctx()
+        .args(["hook", "install", "codex", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let output = project
+        .ctx()
+        .args(["hook", "handle", "--host", "codex", "--cwd"])
+        .arg(project.root.path())
+        .write_stdin(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"session-1","turn_id":"turn-1","prompt":"change the ctx hook plugin"}"#,
+        )
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("hookSpecificOutput"));
+    assert!(output.contains("additionalContext"));
+    assert!(output.contains("ctx show --cwd <repo>"));
+    assert!(output.contains("visible ctx memory writeback check"));
+    assert!(!output.contains("command: hook ingest"));
+
+    let conn = Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let event_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM hook_events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(event_count, 1);
+}
+
+#[test]
+fn hook_install_global_writes_marketplaces_and_guidance_fallback() {
+    let project = TestProject::new();
+    let install = project
+        .ctx()
+        .args(["hook", "install", "all", "--global", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let install = String::from_utf8(install).unwrap();
+    assert!(install.contains("scope: global"));
+    assert!(install.contains("registration_command"));
+    assert!(install.contains("codex plugin marketplace add"));
+    assert!(install.contains("/plugin marketplace add"));
+
+    let home = project.home.path();
+    assert!(home.join("hooks/guidance.md").exists());
+    let guidance = fs::read_to_string(home.join("hooks/guidance.md")).unwrap();
+    assert!(guidance.contains("visible ctx memory writeback check"));
+    fs::write(
+        home.join("hooks/guidance.md"),
+        r#"# ctx Grounding Guidance
+
+For non-trivial repo work, ground yourself before answering or editing:
+- Inspect live source at the real callpath; live source wins over memory, docs, and guesses.
+- Use project-linked ctx resources when they can establish relevant context: start with `ctx show --cwd <repo>`, then use `ctx query`, `ctx path`, or `ctx sync` as needed.
+- Treat ctx, memories, linked docs, and prior notes as guidance, not proof; verify drift-prone facts against current source, runtime output, or official docs.
+- If a claim is not established, check it or state the uncertainty instead of making it up.
+"#,
+    )
+    .unwrap();
+    project
+        .ctx()
+        .args(["hook", "install", "all", "--global", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    let refreshed_guidance = fs::read_to_string(home.join("hooks/guidance.md")).unwrap();
+    assert!(refreshed_guidance.contains("visible ctx memory writeback check"));
+    assert!(home.join("hooks/codex-memory-hook.sh").exists());
+    assert!(home.join("hooks/claude-memory-hook.sh").exists());
+    assert!(
+        home.join("plugin-marketplaces/codex/.agents/plugins/marketplace.json")
+            .exists()
+    );
+    assert!(
+        home.join("plugin-marketplaces/codex/.codex-plugin/plugin.json")
+            .exists()
+    );
+    let codex_marketplace_json: Value = serde_json::from_str(
+        &fs::read_to_string(
+            home.join("plugin-marketplaces/codex/.agents/plugins/marketplace.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        codex_marketplace_json["plugins"][0]["source"]["source"].as_str(),
+        Some("local")
+    );
+    assert_eq!(
+        codex_marketplace_json["plugins"][0]["source"]["path"].as_str(),
+        Some("./")
+    );
+    let codex_plugin_json: Value = serde_json::from_str(
+        &fs::read_to_string(home.join("plugin-marketplaces/codex/.codex-plugin/plugin.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        codex_plugin_json["hooks"].as_str(),
+        Some("./.codex-plugin/hooks.json")
+    );
+    assert_eq!(codex_plugin_json["author"]["name"], "ctx");
+    assert!(codex_plugin_json["interface"]["capabilities"].is_array());
+    let codex_skill =
+        fs::read_to_string(home.join("plugin-marketplaces/codex/skills/memory/SKILL.md")).unwrap();
+    assert!(codex_skill.contains("visible memory writeback check"));
+    assert!(
+        home.join("plugin-marketplaces/claude/.claude-plugin/marketplace.json")
+            .exists()
+    );
+    assert!(
+        home.join("plugin-marketplaces/claude/plugins/ctx-memory/.claude-plugin/plugin.json")
+            .exists()
+    );
+
+    fs::write(
+        home.join("hooks/guidance.md"),
+        "custom global ctx grounding\n",
+    )
+    .unwrap();
+    project
+        .ctx()
+        .args(["hook", "install", "all", "--global", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(home.join("hooks/guidance.md")).unwrap(),
+        "custom global ctx grounding\n"
+    );
+    let output = project
+        .ctx()
+        .args(["hook", "handle", "--host", "codex", "--cwd"])
+        .arg(project.root.path())
+        .write_stdin(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"session-1","prompt":"global grounding"}"#,
+        )
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("custom global ctx grounding"));
+
+    let doctor = project
+        .ctx()
+        .args(["hook", "doctor", "--global", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let doctor = String::from_utf8(doctor).unwrap();
+    assert!(doctor.contains("scope: global"));
+    assert!(doctor.contains("codex-memory-hook.sh"));
+    assert!(doctor.contains("claude-memory-hook.sh"));
+    assert!(doctor.contains("plugin_exists"));
+    assert!(doctor.contains("marketplace_exists"));
+}
+
+#[test]
+fn memory_job_commands_claim_prompt_and_apply_without_background_execution() {
+    let project = TestProject::new();
+    let schema = r#"{"type":"object","required":["candidates"],"properties":{"candidates":{"type":"array"}}}"#;
+
+    let enqueue = project
+        .ctx()
+        .args([
+            "memory",
+            "job",
+            "enqueue",
+            "--kind",
+            "l1_extract",
+            "--objective",
+            "Extract memory candidates from hook evidence",
+            "--evidence-json",
+            r#"[{"event_id":"evt1","summary":"Prefer cargo test for Rust changes"}]"#,
+            "--result-schema-json",
+            schema,
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let job_id = first_toon_id(&enqueue);
+
+    let claimed = project
+        .ctx()
+        .args([
+            "memory",
+            "job",
+            "next",
+            "--lease-owner",
+            "visible-agent",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let claimed = String::from_utf8(claimed).unwrap();
+    assert!(claimed.contains("status: running"));
+    assert!(claimed.contains("lease_owner: \"visible-agent\""));
+    assert!(claimed.contains("attempts: 1"));
+
+    let prompt = project
+        .ctx()
+        .args(["memory", "job", "prompt", &job_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prompt = String::from_utf8(prompt).unwrap();
+    assert!(prompt.contains("Return only JSON"));
+    assert!(prompt.contains("Do not call a background harness or provider endpoint"));
+    assert!(prompt.contains("Prefer cargo test"));
+
+    let result_path = project.root.path().join("job-result.json");
+    fs::write(
+        &result_path,
+        r#"{"candidates":[{"content":"Prefer cargo test for Rust changes"}]}"#,
+    )
+    .unwrap();
+    let applied = project
+        .ctx()
+        .args(["memory", "job", "apply", &job_id])
+        .arg(&result_path)
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let applied = String::from_utf8(applied).unwrap();
+    assert!(applied.contains("status: done"));
+    assert!(applied.contains("Prefer cargo test"));
+
+    let empty = project
+        .ctx()
+        .args(["memory", "job", "next", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let empty = String::from_utf8(empty).unwrap();
+    assert!(empty.contains("job: null"));
+
+    project
+        .ctx()
+        .args([
+            "memory",
+            "job",
+            "enqueue",
+            "--kind",
+            "l1_extract",
+            "--objective",
+            "Return queued work to the visible harness",
+            "--result-schema-json",
+            schema,
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    let process = project
+        .ctx()
+        .args(["memory", "process", "--lease-owner", "codex", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let process = String::from_utf8(process).unwrap();
+    assert!(process.contains("mode: visible_harness"));
+    assert!(process.contains("background: false"));
+    assert!(process.contains("ctx memory job apply"));
+    assert!(process.contains("Return only JSON"));
+}
+
+#[test]
+fn l1_enqueue_and_apply_stores_review_gated_deduped_memory() {
+    let project = TestProject::new();
+
+    let hook = project
+        .ctx()
+        .args([
+            "hook",
+            "ingest",
+            "--host",
+            "codex",
+            "--event",
+            "UserMessage",
+            "--session-key",
+            "thread-l1",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .write_stdin(
+            r#"{"role":"user","content":"I prefer terse Rust test summaries.","note":"L1 source evidence"}"#,
+        )
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let event_id = first_toon_field(&hook, "event_id");
+
+    project
+        .ctx()
+        .arg("remember")
+        .arg("Active duplicate memory carries CTX_L1_DUPLICATE.")
+        .args(["--kind", "fact", "--subject", "l1.duplicate", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let enqueue = project
+        .ctx()
+        .args(["memory", "l1", "enqueue", "--limit", "10", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let job_id = first_toon_id(&enqueue);
+    let enqueue = String::from_utf8(enqueue).unwrap();
+    assert!(enqueue.contains("kind: l1_extract"));
+    assert!(enqueue.contains("evidence_count: 1"));
+
+    let prompt = project
+        .ctx()
+        .args(["memory", "job", "prompt", &job_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prompt = String::from_utf8(prompt).unwrap();
+    assert!(prompt.contains("Extract only durable, reusable memories"));
+    assert!(prompt.contains("source_event_ids"));
+    assert!(prompt.contains(&event_id));
+
+    let result_path = project.root.path().join("l1-result.json");
+    fs::write(
+        &result_path,
+        format!(
+            r#"{{
+              "scene_name":"Rust test workflow",
+              "candidates":[
+                {{
+                  "kind":"preference",
+                  "subject":"testing.rust",
+                  "trigger":"Rust changes",
+                  "content":"I prefer terse Rust test summaries.",
+                  "tags":["rust"],
+                  "source_event_ids":["{event_id}"]
+                }},
+                {{
+                  "kind":"fact",
+                  "subject":"l1.duplicate",
+                  "content":"Active duplicate memory carries CTX_L1_DUPLICATE.",
+                  "source_event_ids":["{event_id}"]
+                }}
+              ]
+            }}"#
+        ),
+    )
+    .unwrap();
+
+    let applied = project
+        .ctx()
+        .args(["memory", "job", "apply", &job_id])
+        .arg(&result_path)
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let applied = String::from_utf8(applied).unwrap();
+    assert!(applied.contains("stored_count: 1"));
+    assert!(applied.contains("skipped_count: 1"));
+    assert!(applied.contains("exact_active_duplicate"));
+    assert!(applied.contains("testing.rust"));
+
+    let review = project
+        .ctx()
+        .args(["memory", "review", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let review = String::from_utf8(review).unwrap();
+    assert!(review.contains("I prefer terse Rust test summaries."));
+    assert!(review.contains("suggested"));
+    assert!(!review.contains("CTX_L1_DUPLICATE"));
+
+    let recall = project
+        .ctx()
+        .args(["recall", "terse Rust test summaries", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recall = String::from_utf8(recall).unwrap();
+    assert!(!recall.contains("I prefer terse Rust test summaries."));
+
+    let conn = Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let evidence_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM memory_evidence e
+             JOIN memories m ON m.id = e.memory_id
+             WHERE m.subject = 'testing.rust' AND e.source_id = ?1",
+            [&event_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(evidence_count, 1);
+}
+
+#[test]
+fn l2_enqueue_and_apply_materializes_scene_brief() {
+    let project = TestProject::new();
+
+    let memory = project
+        .ctx()
+        .arg("remember")
+        .arg("For deployment reviews, run make check before handing off.")
+        .args([
+            "--kind",
+            "recipe",
+            "--subject",
+            "deployment.review",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let memory_id = first_toon_id(&memory);
+
+    let enqueue = project
+        .ctx()
+        .args(["memory", "l2", "enqueue", "--limit", "10", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let job_id = first_toon_id(&enqueue);
+    let enqueue = String::from_utf8(enqueue).unwrap();
+    assert!(enqueue.contains("kind: l2_scene"));
+    assert!(enqueue.contains("evidence_count: 1"));
+
+    let prompt = project
+        .ctx()
+        .args(["memory", "job", "prompt", &job_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prompt = String::from_utf8(prompt).unwrap();
+    assert!(prompt.contains("Group related accepted L1 memories"));
+    assert!(prompt.contains(&memory_id));
+
+    let result_path = project.root.path().join("l2-result.json");
+    let l2_result = json!({
+        "scenes": [{
+            "action": "create",
+            "scene_name": "Deployment Review",
+            "summary": "Deployment handoffs require make check.",
+            "heat": 0.8,
+            "body_markdown": "## Deployment Review\n\nRun `make check` before handoff.",
+            "source_memory_ids": [memory_id],
+        }]
+    });
+    fs::write(&result_path, serde_json::to_string(&l2_result).unwrap()).unwrap();
+
+    let applied = project
+        .ctx()
+        .args(["memory", "job", "apply", &job_id])
+        .arg(&result_path)
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let applied = String::from_utf8(applied).unwrap();
+    assert!(applied.contains("materialized_count: 1"));
+    assert!(applied.contains("Deployment Review"));
+
+    let conn = Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let row: (String, String, String, String) = conn
+        .query_row(
+            "SELECT scene_name, summary, status, source_memory_ids_json FROM scene_briefs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(row.0, "Deployment Review");
+    assert_eq!(row.1, "Deployment handoffs require make check.");
+    assert_eq!(row.2, "active");
+    assert!(row.3.contains(&memory_id));
+}
+
+#[test]
+fn l3_enqueue_and_apply_creates_profile_revision() {
+    let project = TestProject::new();
+
+    let memory = project
+        .ctx()
+        .arg("remember")
+        .arg("Deployment reviews use make check before handoff.")
+        .args([
+            "--kind",
+            "recipe",
+            "--subject",
+            "deployment.review",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let memory_id = first_toon_id(&memory);
+
+    let l2_job = project
+        .ctx()
+        .args(["memory", "l2", "enqueue", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let l2_job_id = first_toon_id(&l2_job);
+    let l2_result_path = project.root.path().join("l2-for-l3.json");
+    let l2_result = json!({
+        "scenes": [{
+            "action": "create",
+            "scene_name": "Deployment Review",
+            "summary": "Deployment review requires make check.",
+            "heat": 0.9,
+            "body_markdown": "## Deployment Review\n\nRun `make check` before handoff.",
+            "source_memory_ids": [memory_id],
+        }]
+    });
+    fs::write(&l2_result_path, serde_json::to_string(&l2_result).unwrap()).unwrap();
+    project
+        .ctx()
+        .args(["memory", "job", "apply", &l2_job_id])
+        .arg(&l2_result_path)
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let conn = Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let scene_id: String = conn
+        .query_row("SELECT id FROM scene_briefs", [], |row| row.get(0))
+        .unwrap();
+
+    let enqueue = project
+        .ctx()
+        .args(["memory", "l3", "enqueue", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let job_id = first_toon_id(&enqueue);
+    let enqueue = String::from_utf8(enqueue).unwrap();
+    assert!(enqueue.contains("kind: l3_profile"));
+    assert!(enqueue.contains("evidence_count: 1"));
+
+    let prompt = project
+        .ctx()
+        .args(["memory", "job", "prompt", &job_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prompt = String::from_utf8(prompt).unwrap();
+    assert!(prompt.contains("Build a compact profile"));
+    assert!(prompt.contains(&scene_id));
+
+    let l3_result_path = project.root.path().join("l3-result.json");
+    let l3_result = json!({
+        "summary": "Deployment handoffs require make check.",
+        "profile_markdown": "# Profile\n\n- Deployment reviews use `make check` before handoff.\n- Verify live repository evidence before treating this as current state.",
+        "source_scene_ids": [scene_id],
+    });
+    fs::write(&l3_result_path, serde_json::to_string(&l3_result).unwrap()).unwrap();
+    let applied = project
+        .ctx()
+        .args(["memory", "job", "apply", &job_id])
+        .arg(&l3_result_path)
+        .args(["--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let applied = String::from_utf8(applied).unwrap();
+    assert!(applied.contains("l3_profile"));
+    assert!(applied.contains("version: 1"));
+
+    let row: (i64, String, String, String) = conn
+        .query_row(
+            "SELECT version, summary, profile_markdown, source_scene_ids_json FROM persona_profiles",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(row.0, 1);
+    assert_eq!(row.1, "Deployment handoffs require make check.");
+    assert!(row.2.contains("Verify live repository evidence"));
+    assert!(row.3.contains(&scene_id));
+}
+
+#[test]
+fn offload_add_show_and_graph_render_mermaid() {
+    let project = TestProject::new();
+    let payload_path = project.root.path().join("runner-log.txt");
+    fs::write(
+        &payload_path,
+        "Very large runner log with CTX_OFFLOAD_PAYLOAD_TOKEN and retained details.",
+    )
+    .unwrap();
+
+    let created = project
+        .ctx()
+        .args([
+            "offload",
+            "add",
+            "--kind",
+            "tool_result",
+            "--title",
+            "Runner log",
+            "--summary",
+            "Retained CI runner log",
+            "--content-file",
+        ])
+        .arg(&payload_path)
+        .args(["--media-type", "text/plain", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let node_id = first_toon_id(&created);
+    let created = String::from_utf8(created).unwrap();
+    assert!(created.contains("content_hash"));
+    assert!(created.contains("size_bytes"));
+
+    let shown = project
+        .ctx()
+        .args(["offload", "show", &node_id, "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let shown = String::from_utf8(shown).unwrap();
+    assert!(shown.contains("Runner log"));
+    assert!(shown.contains("Retained CI runner log"));
+    assert!(shown.contains("text/plain"));
+
+    project
+        .ctx()
+        .args([
+            "offload",
+            "add",
+            "--kind",
+            "summary",
+            "--title",
+            "Follow-up summary",
+            "--summary",
+            "Compressed child node",
+            "--parent",
+            &node_id,
+            "--edge-kind",
+            "summarizes",
+            "--cwd",
+        ])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let graph = project
+        .ctx()
+        .args(["offload", "graph", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let graph = String::from_utf8(graph).unwrap();
+    assert!(graph.contains("flowchart TD"));
+    assert!(graph.contains("Runner log"));
+    assert!(graph.contains("Follow-up summary"));
+    assert!(graph.contains("summarizes"));
+
+    let conn = Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let blob_path: String = conn
+        .query_row("SELECT path FROM payload_blobs", [], |row| row.get(0))
+        .unwrap();
+    assert!(Path::new(&blob_path).exists());
+}
+
+#[test]
 fn docs_crawl_recursively_indexes_linked_pages() {
     let site = FixtureSite::new(HashMap::from([
         (
@@ -1531,13 +2560,77 @@ fn unlink_removes_project_link_without_deleting_cache() {
 fn install_copies_binary_to_requested_bin_dir() {
     let project = TestProject::new();
     let bin_dir = project.root.path().join("bin");
-    project
+    let output = project
         .ctx()
         .args(["install", "--bin-dir"])
         .arg(&bin_dir)
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("install_version_status: new_install"));
     assert!(bin_dir.join("ctx").exists());
+    let metadata_path = bin_dir.join("ctx.install.json");
+    assert!(metadata_path.exists());
+    let metadata: Value =
+        serde_json::from_str(&fs::read_to_string(metadata_path).unwrap()).unwrap();
+    assert_eq!(metadata["version"], env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn install_reports_replacing_untracked_binary() {
+    let project = TestProject::new();
+    let bin_dir = project.root.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(bin_dir.join("ctx"), "old binary placeholder").unwrap();
+    let output = project
+        .ctx()
+        .args(["install", "--bin-dir"])
+        .arg(&bin_dir)
+        .arg("--force")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("install_version_status: replaced_untracked_install"));
+    assert!(output.contains("existing ctx install had no version metadata"));
+}
+
+#[test]
+fn doctor_reports_outdated_default_install_metadata() {
+    let project = TestProject::new();
+    let bin_dir = project.home.path().join(".local/bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(bin_dir.join("ctx"), "old binary placeholder").unwrap();
+    fs::write(
+        bin_dir.join("ctx.install.json"),
+        r#"{
+  "version": "0.1.0",
+  "installed_at": "2026-01-01T00:00:00Z",
+  "source": "/tmp/ctx",
+  "target": "/tmp/home/.local/bin/ctx"
+}
+"#,
+    )
+    .unwrap();
+    let output = project
+        .ctx()
+        .env("HOME", project.home.path())
+        .args(["doctor", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("installed_version: \"0.1.0\""));
+    assert!(output.contains("status: outdated"));
+    assert!(output.contains("default ctx install is older"));
 }
 
 #[test]

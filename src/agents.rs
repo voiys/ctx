@@ -21,7 +21,12 @@ Use `ctx` for this project's local context and operational memory.
 Before non-trivial work, check for prior project lessons:
 
 - `ctx recall "<task, repo, or failure pattern>" --cwd <repo>` recalls scoped memories. Treat results as evidence-backed hints and verify drift-prone facts against the live repo.
+- `ctx hook recall "<latest user turn or task>" --cwd <repo>` returns bounded prompt-ready memory context. Inject it only as supporting context; live repo evidence still wins.
 - `ctx remember "<concise reusable lesson>" --kind preference|fact|decision|recipe|warning --subject <stable.topic> --scope project --cwd <repo>` stores confirmed durable lessons. Use `--suggested` for plausible but unconfirmed lessons. Do not store secrets, one-off noise, or unresolved guesses.
+- Before final responses on non-trivial work, run a visible memory writeback check. If the turn established a durable preference, decision, repo workflow, root cause, verification rule, or reusable lesson, call `ctx remember` in the active conversation. Skip current/latest facts unless they are stored as dated observations with date and source.
+- `ctx memory review --cwd <repo>`, `ctx memory accept <id> --cwd <repo>`, and `ctx memory reject <id> --cwd <repo>` manage review-gated memory candidates.
+- `ctx memory process --cwd <repo>` claims queued memory work for the visible agent harness. Do not run hidden background model work; apply results explicitly with `ctx memory job apply <id> <result.json> --cwd <repo>`.
+- `ctx offload add --kind <kind> --title <title> --content-file <path> --cwd <repo>` stores large payloads as blobs; `ctx offload graph --cwd <repo>` renders the task graph as Mermaid.
 
 Use project context when source, docs, research, or notes evidence is needed:
 

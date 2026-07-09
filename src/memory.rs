@@ -238,6 +238,34 @@ pub(crate) fn recall(
     scopes: &[ResolvedMemoryScope],
     top_k: usize,
 ) -> Result<Vec<serde_json::Value>> {
+    let results = recall_inner(db_path, query, scopes, top_k)?;
+    mark_recall_results_used(db_path, &results)?;
+    Ok(results)
+}
+
+pub(crate) fn recall_without_marking(
+    db_path: &Path,
+    query: &str,
+    scopes: &[ResolvedMemoryScope],
+    top_k: usize,
+) -> Result<Vec<serde_json::Value>> {
+    recall_inner(db_path, query, scopes, top_k)
+}
+
+pub(crate) fn mark_recall_results_used(
+    db_path: &Path,
+    results: &[serde_json::Value],
+) -> Result<()> {
+    let memory_ids = memory_ids_from_results(results);
+    mark_memories_used(db_path, &memory_ids)
+}
+
+fn recall_inner(
+    db_path: &Path,
+    query: &str,
+    scopes: &[ResolvedMemoryScope],
+    top_k: usize,
+) -> Result<Vec<serde_json::Value>> {
     ensure_db(db_path)?;
     if top_k == 0 {
         return Ok(Vec::new());
@@ -245,8 +273,11 @@ pub(crate) fn recall(
     let lexical = lexical_candidates(db_path, query, scopes, top_k.max(50) * 10)?;
     let vector = vector_candidates(db_path, query, scopes, top_k.max(50) * 10)?;
     let fused = fuse_candidates(lexical, vector);
-    let results = grouped_agent_results(db_path, fused, top_k, query)?;
-    let memory_ids = results
+    grouped_agent_results(db_path, fused, top_k, query)
+}
+
+fn memory_ids_from_results(results: &[serde_json::Value]) -> BTreeSet<String> {
+    results
         .iter()
         .filter_map(|result| {
             result
@@ -256,9 +287,7 @@ pub(crate) fn recall(
                 .and_then(|value| value.as_str())
                 .map(str::to_string)
         })
-        .collect::<BTreeSet<_>>();
-    mark_memories_used(db_path, &memory_ids)?;
-    Ok(results)
+        .collect()
 }
 
 fn lexical_candidates(
@@ -599,6 +628,64 @@ pub(crate) fn forget_memory(
     Ok(json!({
         "id": id,
         "status": "dismissed",
+    }))
+}
+
+pub(crate) fn accept_memory(
+    db_path: &Path,
+    id: &str,
+    scopes: &[ResolvedMemoryScope],
+) -> Result<serde_json::Value> {
+    transition_memory_status(db_path, id, scopes, "active", Some("suggested"), true)
+}
+
+pub(crate) fn reject_memory(
+    db_path: &Path,
+    id: &str,
+    scopes: &[ResolvedMemoryScope],
+) -> Result<serde_json::Value> {
+    transition_memory_status(db_path, id, scopes, "dismissed", Some("suggested"), false)
+}
+
+fn transition_memory_status(
+    db_path: &Path,
+    id: &str,
+    scopes: &[ResolvedMemoryScope],
+    status: &str,
+    expected_status: Option<&str>,
+    confirm: bool,
+) -> Result<serde_json::Value> {
+    ensure_db(db_path)?;
+    let now = timestamp();
+    let conn = Connection::open(db_path)?;
+    let memory = find_memory(&conn, id)?;
+    if !scope_matches(&memory, scopes) {
+        bail!("memory not found: {id}");
+    }
+    if let Some(expected_status) = expected_status
+        && memory.status != expected_status
+    {
+        bail!(
+            "memory {id} has status {}, expected {expected_status}",
+            memory.status
+        );
+    }
+    if confirm {
+        conn.execute(
+            "UPDATE memories
+             SET status = ?1, updated_at = ?2, confirmed_at = COALESCE(confirmed_at, ?2)
+             WHERE id = ?3",
+            params![status, now, id],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE memories SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status, now, id],
+        )?;
+    }
+    let memory = find_memory(&conn, id)?;
+    Ok(json!({
+        "memory": memory_json(&memory),
     }))
 }
 
