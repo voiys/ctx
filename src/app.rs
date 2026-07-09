@@ -1503,14 +1503,15 @@ fn memory_relevant_for_hook(item: &Value, query_terms: &BTreeSet<String>) -> boo
                 .and_then(Value::as_u64)
                 .is_some()
         });
-    if has_lexical_match && body_overlap > 0 {
-        return true;
-    }
-
     let scope = memory
         .get("scope")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let lexical_overlap_threshold = if scope == "global" { 2 } else { 1 };
+    if has_lexical_match && body_overlap >= lexical_overlap_threshold {
+        return true;
+    }
+
     let has_vector_match = item
         .get("evidence")
         .and_then(Value::as_array)
@@ -1588,6 +1589,7 @@ fn is_hook_recall_stopword(term: &str) -> bool {
         "a" | "about"
             | "after"
             | "also"
+            | "already"
             | "am"
             | "an"
             | "and"
@@ -1600,6 +1602,8 @@ fn is_hook_recall_stopword(term: &str) -> bool {
             | "before"
             | "by"
             | "can"
+            | "chat"
+            | "check"
             | "could"
             | "did"
             | "do"
@@ -1618,7 +1622,9 @@ fn is_hook_recall_stopword(term: &str) -> bool {
             | "is"
             | "it"
             | "just"
+            | "last"
             | "me"
+            | "message"
             | "my"
             | "of"
             | "on"
@@ -1631,6 +1637,8 @@ fn is_hook_recall_stopword(term: &str) -> bool {
             | "this"
             | "those"
             | "to"
+            | "u"
+            | "ur"
             | "use"
             | "was"
             | "we"
@@ -1730,6 +1738,33 @@ mod tests {
 
         assert!(packed.contains("agent-instructions.no-op-test"));
         assert_eq!(selected.len(), 1);
+    }
+
+    #[test]
+    fn hook_pack_filters_global_memory_with_only_generic_body_overlap() {
+        let memories = vec![json!({
+            "memory": {
+                "scope": "global",
+                "kind": "preference",
+                "subject": "agent-instructions.no-op-test",
+                "content": "When optimizing agent instructions or skills, apply the no-op test: keep only instructions that change behavior through a trigger, concrete action, output shape, threshold/check, command, fallback rule, or blocker/reporting requirement."
+            },
+            "evidence": [{
+                "plain_text": "When optimizing agent instructions or skills, apply the no-op test: keep only instructions that change behavior through a trigger, concrete action, output shape, threshold/check, command, fallback rule, or blocker/reporting requirement.",
+                "lexical_rank": 2,
+                "vector_rank": 5
+            }]
+        })];
+
+        let (packed, selected, _) = pack_l1_context(
+            &memories,
+            256,
+            "are the hooks already upgraded in this chat? u can check on ur last message",
+            5,
+        );
+
+        assert!(!packed.contains("agent-instructions.no-op-test"));
+        assert!(selected.is_empty());
     }
 }
 
