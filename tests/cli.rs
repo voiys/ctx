@@ -265,6 +265,7 @@ fn init_writes_agents_block_with_memory_guidance() {
     assert!(agents.contains("Use `ctx` for this project's local context and operational memory."));
     assert!(agents.contains("ctx recall \"<task, repo, or failure pattern>\" --cwd <repo>"));
     assert!(agents.contains("ctx remember \"<concise reusable lesson>\""));
+    assert!(agents.contains("visible memory writeback check"));
     assert!(agents.contains("--suggested"));
     assert!(agents.contains("ctx hook recall \"<latest user turn or task>\" --cwd <repo>"));
     assert!(agents.contains("ctx memory process --cwd <repo>"));
@@ -1300,6 +1301,7 @@ fn hook_handle_ingests_event_and_injects_grounding_context() {
     assert!(output.contains("hookSpecificOutput"));
     assert!(output.contains("additionalContext"));
     assert!(output.contains("ctx show --cwd <repo>"));
+    assert!(output.contains("visible ctx memory writeback check"));
     assert!(!output.contains("command: hook ingest"));
 
     let conn = Connection::open(project.home.path().join("ctx.db")).unwrap();
@@ -1329,6 +1331,28 @@ fn hook_install_global_writes_marketplaces_and_guidance_fallback() {
 
     let home = project.home.path();
     assert!(home.join("hooks/guidance.md").exists());
+    let guidance = fs::read_to_string(home.join("hooks/guidance.md")).unwrap();
+    assert!(guidance.contains("visible ctx memory writeback check"));
+    fs::write(
+        home.join("hooks/guidance.md"),
+        r#"# ctx Grounding Guidance
+
+For non-trivial repo work, ground yourself before answering or editing:
+- Inspect live source at the real callpath; live source wins over memory, docs, and guesses.
+- Use project-linked ctx resources when they can establish relevant context: start with `ctx show --cwd <repo>`, then use `ctx query`, `ctx path`, or `ctx sync` as needed.
+- Treat ctx, memories, linked docs, and prior notes as guidance, not proof; verify drift-prone facts against current source, runtime output, or official docs.
+- If a claim is not established, check it or state the uncertainty instead of making it up.
+"#,
+    )
+    .unwrap();
+    project
+        .ctx()
+        .args(["hook", "install", "all", "--global", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    let refreshed_guidance = fs::read_to_string(home.join("hooks/guidance.md")).unwrap();
+    assert!(refreshed_guidance.contains("visible ctx memory writeback check"));
     assert!(home.join("hooks/codex-memory-hook.sh").exists());
     assert!(home.join("hooks/claude-memory-hook.sh").exists());
     assert!(
@@ -1365,6 +1389,9 @@ fn hook_install_global_writes_marketplaces_and_guidance_fallback() {
     );
     assert_eq!(codex_plugin_json["author"]["name"], "ctx");
     assert!(codex_plugin_json["interface"]["capabilities"].is_array());
+    let codex_skill =
+        fs::read_to_string(home.join("plugin-marketplaces/codex/skills/memory/SKILL.md")).unwrap();
+    assert!(codex_skill.contains("visible memory writeback check"));
     assert!(
         home.join("plugin-marketplaces/claude/.claude-plugin/marketplace.json")
             .exists()
@@ -1379,6 +1406,16 @@ fn hook_install_global_writes_marketplaces_and_guidance_fallback() {
         "custom global ctx grounding\n",
     )
     .unwrap();
+    project
+        .ctx()
+        .args(["hook", "install", "all", "--global", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(home.join("hooks/guidance.md")).unwrap(),
+        "custom global ctx grounding\n"
+    );
     let output = project
         .ctx()
         .args(["hook", "handle", "--host", "codex", "--cwd"])

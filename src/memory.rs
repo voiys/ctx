@@ -238,6 +238,34 @@ pub(crate) fn recall(
     scopes: &[ResolvedMemoryScope],
     top_k: usize,
 ) -> Result<Vec<serde_json::Value>> {
+    let results = recall_inner(db_path, query, scopes, top_k)?;
+    mark_recall_results_used(db_path, &results)?;
+    Ok(results)
+}
+
+pub(crate) fn recall_without_marking(
+    db_path: &Path,
+    query: &str,
+    scopes: &[ResolvedMemoryScope],
+    top_k: usize,
+) -> Result<Vec<serde_json::Value>> {
+    recall_inner(db_path, query, scopes, top_k)
+}
+
+pub(crate) fn mark_recall_results_used(
+    db_path: &Path,
+    results: &[serde_json::Value],
+) -> Result<()> {
+    let memory_ids = memory_ids_from_results(results);
+    mark_memories_used(db_path, &memory_ids)
+}
+
+fn recall_inner(
+    db_path: &Path,
+    query: &str,
+    scopes: &[ResolvedMemoryScope],
+    top_k: usize,
+) -> Result<Vec<serde_json::Value>> {
     ensure_db(db_path)?;
     if top_k == 0 {
         return Ok(Vec::new());
@@ -245,8 +273,11 @@ pub(crate) fn recall(
     let lexical = lexical_candidates(db_path, query, scopes, top_k.max(50) * 10)?;
     let vector = vector_candidates(db_path, query, scopes, top_k.max(50) * 10)?;
     let fused = fuse_candidates(lexical, vector);
-    let results = grouped_agent_results(db_path, fused, top_k, query)?;
-    let memory_ids = results
+    grouped_agent_results(db_path, fused, top_k, query)
+}
+
+fn memory_ids_from_results(results: &[serde_json::Value]) -> BTreeSet<String> {
+    results
         .iter()
         .filter_map(|result| {
             result
@@ -256,9 +287,7 @@ pub(crate) fn recall(
                 .and_then(|value| value.as_str())
                 .map(str::to_string)
         })
-        .collect::<BTreeSet<_>>();
-    mark_memories_used(db_path, &memory_ids)?;
-    Ok(results)
+        .collect()
 }
 
 fn lexical_candidates(

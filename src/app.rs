@@ -36,8 +36,9 @@ use crate::manifest::{
 };
 use crate::memory::{
     RememberInput, ResolvedMemoryScope, accept_memory, export_memories, forget_memory,
-    list_memories, recall as recall_memories, reject_memory, remember as remember_memory,
-    show_memory,
+    list_memories, mark_recall_results_used, recall as recall_memories,
+    recall_without_marking as recall_memories_without_marking, reject_memory,
+    remember as remember_memory, show_memory,
 };
 use crate::models::{
     CommandStatus, Defaults, Manifest, MemoryKind, MemoryScope, MemoryStatus, QueryKind,
@@ -70,6 +71,7 @@ const AGENT_HELP: &str = "Agent quick start:
   ctx query \"<question>\" --cwd <repo>
   ctx query \"<question>\" --label <docs-label> --cwd <repo>
   ctx remember \"<durable lesson>\" --kind fact --subject <topic> --scope project --cwd <repo>
+  Before final responses, store durable preferences, decisions, workflows, root causes, or verification rules with ctx remember.
 
 Gotchas:
   Always pass --cwd for the repo you mean.
@@ -1306,8 +1308,15 @@ fn hook_handle(cwd: Option<PathBuf>, host: String, top_k: usize, budget: usize) 
             String::new()
         } else {
             let scopes = recall_scopes(&app.paths, None, None)?;
-            let memories = recall_memories(&app.paths.db_path, &question, &scopes, top_k)?;
-            let (packed_context, _, _) = pack_l1_context(&memories, budget);
+            let memories = recall_memories_without_marking(
+                &app.paths.db_path,
+                &question,
+                &scopes,
+                hook_recall_candidate_limit(top_k),
+            )?;
+            let (packed_context, selected_l1, _) =
+                pack_l1_context(&memories, budget, &question, top_k);
+            mark_recall_results_used(&app.paths.db_path, &selected_l1)?;
             packed_context
         };
         let context = hook_context(
@@ -1334,8 +1343,15 @@ fn hook_recall(cwd: Option<PathBuf>, question: &str, top_k: usize, budget: usize
     let app = AppContext::load(cwd)?;
     app.ensure_global_storage()?;
     let scopes = recall_scopes(&app.paths, None, None)?;
-    let memories = recall_memories(&app.paths.db_path, question, &scopes, top_k)?;
-    let (packed_context, selected_l1, estimated_tokens) = pack_l1_context(&memories, budget);
+    let memories = recall_memories_without_marking(
+        &app.paths.db_path,
+        question,
+        &scopes,
+        hook_recall_candidate_limit(top_k),
+    )?;
+    let (packed_context, selected_l1, estimated_tokens) =
+        pack_l1_context(&memories, budget, question, top_k);
+    mark_recall_results_used(&app.paths.db_path, &selected_l1)?;
     print_toon(CommandStatus {
         command: "hook recall",
         status: "ok",
@@ -1388,11 +1404,29 @@ fn should_inject_hook_context(event_name: &str) -> bool {
     matches!(event_name, "SessionStart" | "UserPromptSubmit")
 }
 
-fn pack_l1_context(memories: &[Value], budget_tokens: usize) -> (String, Vec<Value>, usize) {
+const HOOK_RECALL_CANDIDATE_FLOOR: usize = 25;
+
+fn hook_recall_candidate_limit(top_k: usize) -> usize {
+    top_k.max(HOOK_RECALL_CANDIDATE_FLOOR)
+}
+
+fn pack_l1_context(
+    memories: &[Value],
+    budget_tokens: usize,
+    query: &str,
+    max_items: usize,
+) -> (String, Vec<Value>, usize) {
+    if max_items == 0 {
+        return (String::new(), Vec::new(), 0);
+    }
+    let query_terms = hook_recall_terms(query);
     let mut selected = Vec::new();
     let mut entries = Vec::new();
     let mut used_tokens = 0usize;
     for item in memories {
+        if !memory_relevant_for_hook(item, &query_terms) {
+            continue;
+        }
         let Some(memory) = item.get("memory") else {
             continue;
         };
@@ -1421,7 +1455,7 @@ fn pack_l1_context(memories: &[Value], budget_tokens: usize) -> (String, Vec<Val
         used_tokens += entry_tokens;
         entries.push(entry);
         selected.push(item.clone());
-        if used_tokens >= budget_tokens {
+        if used_tokens >= budget_tokens || selected.len() >= max_items {
             break;
         }
     }
@@ -1438,6 +1472,182 @@ fn pack_l1_context(memories: &[Value], budget_tokens: usize) -> (String, Vec<Val
     )
 }
 
+fn memory_relevant_for_hook(item: &Value, query_terms: &BTreeSet<String>) -> bool {
+    if query_terms.is_empty() {
+        return false;
+    }
+    let Some(memory) = item.get("memory") else {
+        return false;
+    };
+
+    let mut anchor_terms = BTreeSet::new();
+    extend_terms_from_field(&mut anchor_terms, memory, "subject");
+    extend_terms_from_field(&mut anchor_terms, memory, "trigger");
+    extend_terms_from_tags(&mut anchor_terms, memory);
+    if term_overlap(query_terms, &anchor_terms) > 0 {
+        return true;
+    }
+
+    let mut body_terms = BTreeSet::new();
+    extend_terms_from_field(&mut body_terms, memory, "content");
+    extend_terms_from_evidence(&mut body_terms, item);
+    let body_overlap = term_overlap(query_terms, &body_terms);
+    let has_lexical_match = item
+        .get("evidence")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|evidence| {
+            evidence
+                .get("lexical_rank")
+                .and_then(Value::as_u64)
+                .is_some()
+        });
+    if has_lexical_match && body_overlap > 0 {
+        return true;
+    }
+
+    let scope = memory
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let has_vector_match = item
+        .get("evidence")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|evidence| {
+            evidence
+                .get("vector_rank")
+                .and_then(Value::as_u64)
+                .is_some()
+        });
+    matches!(scope, "project" | "thread") && has_vector_match && body_overlap >= 2
+}
+
+fn extend_terms_from_field(terms: &mut BTreeSet<String>, value: &Value, field: &str) {
+    if let Some(text) = value.get(field).and_then(Value::as_str) {
+        terms.extend(hook_recall_terms(text));
+    }
+}
+
+fn extend_terms_from_tags(terms: &mut BTreeSet<String>, memory: &Value) {
+    if let Some(tags) = memory.get("tags").and_then(Value::as_array) {
+        for tag in tags.iter().filter_map(Value::as_str) {
+            terms.extend(hook_recall_terms(tag));
+        }
+    }
+}
+
+fn extend_terms_from_evidence(terms: &mut BTreeSet<String>, item: &Value) {
+    if let Some(evidence) = item.get("evidence").and_then(Value::as_array) {
+        for section in evidence {
+            extend_terms_from_field(terms, section, "plain_text");
+            extend_terms_from_field(terms, section, "markdown");
+        }
+    }
+}
+
+fn term_overlap(left: &BTreeSet<String>, right: &BTreeSet<String>) -> usize {
+    left.iter().filter(|term| right.contains(*term)).count()
+}
+
+fn hook_recall_terms(input: &str) -> BTreeSet<String> {
+    input
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter_map(normalize_hook_recall_term)
+        .collect()
+}
+
+fn normalize_hook_recall_term(raw: &str) -> Option<String> {
+    let mut term = raw.trim().to_ascii_lowercase();
+    if term.is_empty() {
+        return None;
+    }
+    if term.len() > 4 && term.ends_with("ies") {
+        term.truncate(term.len() - 3);
+        term.push('y');
+    } else if term.len() > 5 && term.ends_with("ing") {
+        term.truncate(term.len() - 3);
+    } else if term.len() > 4 && term.ends_with("ed") {
+        term.truncate(term.len() - 2);
+    } else if term.len() > 4 && term.ends_with("ly") {
+        term.truncate(term.len() - 2);
+    } else if term.len() > 3 && term.ends_with('s') && !term.ends_with("ss") {
+        term.truncate(term.len() - 1);
+    }
+    if is_hook_recall_stopword(&term) {
+        return None;
+    }
+    Some(term)
+}
+
+fn is_hook_recall_stopword(term: &str) -> bool {
+    matches!(
+        term,
+        "a" | "about"
+            | "after"
+            | "also"
+            | "am"
+            | "an"
+            | "and"
+            | "any"
+            | "are"
+            | "as"
+            | "at"
+            | "be"
+            | "been"
+            | "before"
+            | "by"
+            | "can"
+            | "could"
+            | "did"
+            | "do"
+            | "does"
+            | "done"
+            | "for"
+            | "from"
+            | "had"
+            | "has"
+            | "have"
+            | "how"
+            | "i"
+            | "if"
+            | "in"
+            | "into"
+            | "is"
+            | "it"
+            | "just"
+            | "me"
+            | "my"
+            | "of"
+            | "on"
+            | "or"
+            | "out"
+            | "please"
+            | "should"
+            | "that"
+            | "the"
+            | "this"
+            | "those"
+            | "to"
+            | "use"
+            | "was"
+            | "we"
+            | "were"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "who"
+            | "why"
+            | "with"
+            | "would"
+            | "you"
+            | "your"
+    )
+}
+
 fn estimate_tokens(value: &str) -> usize {
     value.chars().count().div_ceil(4).max(1)
 }
@@ -1451,6 +1661,76 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     let mut out = value.chars().take(keep).collect::<String>();
     out.push_str("...");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn hook_pack_filters_vector_only_global_memory_without_literal_anchor() {
+        let memories = vec![
+            json!({
+                "memory": {
+                    "scope": "global",
+                    "kind": "preference",
+                    "subject": "agent-instructions.no-op-test",
+                    "content": "When optimizing agent instructions or skills, apply the no-op test."
+                },
+                "evidence": [{
+                    "plain_text": "When optimizing agent instructions or skills, apply the no-op test.",
+                    "vector_rank": 1
+                }]
+            }),
+            json!({
+                "memory": {
+                    "scope": "global",
+                    "kind": "fact",
+                    "subject": "current-package-version-verification",
+                    "content": "For current/latest published versions of packages, libraries, runtimes, frameworks, CLIs, or platform components, verify live with the relevant registry or official source before answering."
+                },
+                "evidence": [{
+                    "plain_text": "For current/latest published versions of packages, verify live with the relevant registry.",
+                    "lexical_rank": 1,
+                    "vector_rank": 2
+                }]
+            }),
+        ];
+
+        let (packed, selected, _) =
+            pack_l1_context(&memories, 256, "which TypeScript is currently out?", 5);
+
+        assert!(packed.contains("current-package-version-verification"));
+        assert!(!packed.contains("agent-instructions.no-op-test"));
+        assert_eq!(selected.len(), 1);
+    }
+
+    #[test]
+    fn hook_pack_keeps_global_memory_when_prompt_matches_anchor() {
+        let memories = vec![json!({
+            "memory": {
+                "scope": "global",
+                "kind": "preference",
+                "subject": "agent-instructions.no-op-test",
+                "content": "When optimizing agent instructions or skills, apply the no-op test."
+            },
+            "evidence": [{
+                "plain_text": "When optimizing agent instructions or skills, apply the no-op test.",
+                "vector_rank": 1
+            }]
+        })];
+
+        let (packed, selected, _) = pack_l1_context(
+            &memories,
+            256,
+            "should these agent instructions pass the no-op test?",
+            5,
+        );
+
+        assert!(packed.contains("agent-instructions.no-op-test"));
+        assert_eq!(selected.len(), 1);
+    }
 }
 
 fn offload_add(command: OffloadAddCommand) -> Result<()> {
