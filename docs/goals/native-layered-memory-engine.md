@@ -66,8 +66,8 @@ write SQLite rows or memory files directly.
 ## Inventory Commands
 
 ```bash
-ctx path tencentdb-agent-memory-source --cwd /Users/voiys/Desktop/code/ctx
-rg --files "$(ctx path tencentdb-agent-memory-source --cwd /Users/voiys/Desktop/code/ctx)" | rg '(test|spec)\.(ts|tsx|js|mjs|cjs)$|(__tests__|tests)/'
+ctx path tencentdb-agent-memory-source --cwd <repo>
+rg --files "$(ctx path tencentdb-agent-memory-source --cwd <repo>)" | rg '(test|spec)\.(ts|tsx|js|mjs|cjs)$|(__tests__|tests)/'
 rg -n "L0|L1|L2|L3|offload|hook|memory job|harness" docs src tests
 make check
 ```
