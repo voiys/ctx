@@ -1,400 +1,129 @@
-# ctx V1 Specification
+# ctx specification
 
-## Product Intent
+## Product intent
 
-`ctx` is a Rust CLI that manages global and project-specific context for coding agents.
+ctx is a Rust CLI for grounding coding agents in authoritative references. It manages:
 
-It combines three ideas:
+- pinned source repositories inspected on disk;
+- snapshotted documentation, research papers, and notes retrieved as cited context;
+- an optional project manifest that records which global references matter and why;
+- a bundled `$ctx` skill and generated root AGENTS.md guidance.
 
-- pinned source repositories that agents can inspect on disk
-- snapshotted docs, research papers, and notes that can be retrieved as cited context
-- an optional project manifest that says which global resources matter here and why
+Commands emit compact structured stdout. Progress and diagnostics use stderr.
 
-The CLI is agent-first. It does not have a separate human table output mode. Commands should emit structured, compact stdout and keep progress or diagnostics on stderr.
+## Non-goals
 
-## Non-Goals For V1
+- Agent memory, automatic recall, lifecycle hooks, or background synthesis.
+- Package-manager or multi-ecosystem dependency resolution.
+- Source-code chunk retrieval.
+- Hosted storage or sync.
+- Automatic resource refresh during query.
+- Bare filesystem paths for `ctx add`.
 
-- No npm, PyPI, crates.io, package-manager, or lockfile resolution.
-- No bare paths for `ctx add`.
-- No source-code chunk retrieval by default.
-- No hosted service.
-- No automatic background update during query.
-- No GitLab, Codeberg, or Bitbucket resolver yet, though resolver boundaries should allow them later.
+Dependency grounding stays explicit: inspect the project's real manifest or lockfile, resolve the exact version, then add or link official docs or source pinned to that version.
 
 ## Resources
 
-`ctx add` accepts absolute URLs only.
+`ctx add` accepts absolute URLs:
 
-### Source
+- GitHub repository URLs, optionally with `/tree/<ref>`, become `source` resources pinned to a commit.
+- arXiv URLs become `research_paper` resources with registry metadata and available full text.
+- Other HTTP(S) URLs become recursively crawled `docs` resources.
+- File URLs become snapshotted `notes` resources.
 
-GitHub repository URLs are source resources:
+Source repositories are cached code trees. Docs, papers, and notes are immutable snapshots with stable citations and content hashes. Notes preserve Markdown section metadata.
 
-```text
-https://github.com/owner/repo
-https://github.com/owner/repo/tree/ref
-```
+## Project manifest and global cache
 
-V1 should resolve these to a concrete pinned ref, cache the repository globally, and expose the local path through `ctx path`.
+`.ctx/ctx.json` is an optional curated project view. Each entry records:
 
-Source repositories are not indexed for RAG retrieval by default.
+- id, label, kind, URL, and project-specific reason;
+- current source commit or snapshot id;
+- created and updated timestamps.
 
-### Docs
+The manifest must not store machine-local cache paths. Global resource state and the SQLite index live under `~/.ctx` or `CTX_HOME`.
 
-Any non-GitHub, non-arXiv `http` or `https` URL is a docs resource.
+`ctx add` changes the global cache. `ctx link` and `ctx unlink` change the project manifest. A manifest is not required for global add, update, show, list, query, or remove operations.
 
-Docs are crawled, normalized, snapshotted, indexed, and queried. A docs snapshot is immutable and identified by timestamp plus content fingerprint.
+## Commands
 
-### Research Papers
+### `ctx` and `ctx --help`
 
-Research papers are queryable resources. V1 supports arXiv as the first paper registry:
-
-```text
-https://arxiv.org/abs/1706.03762
-https://arxiv.org/pdf/1706.03762.pdf
-https://arxiv.org/html/1706.03762
-```
-
-V1 normalizes arXiv paper URLs to the canonical abstract URL, snapshots citation metadata and abstract text, and indexes the arXiv HTML full text when arXiv provides it. Future registries should plug into the same `research_paper` resource kind.
-
-Research paper registries can optionally expose version metadata. arXiv does this through paper versions such as `v1` or `v7`; registries without version semantics do not need to implement that capability.
-
-### Notes
-
-`file://` URLs may represent notes.
-
-Notes are snapshotted like docs. Local bare paths are intentionally not accepted by `ctx add`.
-
-Notes are controlled Markdown. Indexing splits notes into parser-derived sections and stores heading path, heading level, parent/previous/next section indexes, anchors, Markdown content, plain text, and content hashes. Headings inside fenced code blocks must not create sections.
-
-### Memories
-
-Memories are explicit operational knowledge records stored separately from resource snapshots. They are not crawled resources and are not linked through `.ctx/ctx.json`.
-
-Memory scopes:
-
-- `global`: visible everywhere
-- `project`: keyed by canonical project root
-- `thread`: keyed by an explicit thread id
-
-Memory kinds:
-
-- `preference`
-- `fact`
-- `decision`
-- `recipe`
-- `warning`
-
-Memory statuses:
-
-- `suggested`
-- `active`
-- `dismissed`
-- `superseded`
-
-Default recall searches active global memories plus active memories for the current project. Suggested memories appear in `ctx memory review` but are not recalled by default.
-
-## Project Manifest
-
-Each project has:
-
-```text
-.ctx/ctx.json
-```
-
-The manifest records project intent and current pointers. It must not store machine-local cache paths such as `local_path`; global cache contents live outside the project. A manifest is not required to collect, update, show, query, or remove global references.
-
-Manifest entries should include:
-
-- `id`
-- `label`
-- `kind`: `source`, `docs`, `research_paper`, or `notes`
-- `url`
-- `reason`
-- `current`: source ref or queryable snapshot id
-- `created_at`
-- `updated_at`
-
-## Global Cache
-
-Suggested layout:
-
-```text
-~/.ctx/
-  ctx.db
-  sources/github.com/<owner>/<repo>/<ref>/
-  docs/<resource-id>/<snapshot-id>/
-  research_papers/<resource-id>/<snapshot-id>/
-  notes/<resource-id>/<snapshot-id>/
-```
-
-Docs, research papers, and notes snapshots should store enough metadata to make citations stable:
-
-- `snapshot_id`
-- `fetched_at`
-- `source_url`
-- `content_hash`
-- `page_count`
-- `path`
-- optional `extra` metadata, such as a research paper registry name and registry version
-
-## CLI Surface
+Print the efficient grounding workflow before the generated command reference. The workflow must cover live-source precedence, `show`, labeled `query`, `path`, add/link with labels and reasons, exact dependency-version grounding, `sync`, `init`, and `agents`.
 
 ### `ctx init`
 
-Create `.ctx/ctx.json` and upsert a generated block into root `AGENTS.md`.
-The generated block tells agents to use `ctx recall` before non-trivial work, `ctx remember` for durable confirmed lessons, and `ctx query`/`ctx path` for project evidence.
+Create `.ctx/ctx.json` when missing and idempotently upsert the generated root AGENTS.md block.
 
-Flags:
+- `--cwd <path>` selects the project root.
+- `--no-agents` skips AGENTS.md generation.
 
-- `--cwd <path>`: project root override
-- `--no-agents`: create `.ctx` only
+### `ctx agents`
+
+Idempotently upsert only the generated root AGENTS.md block. This is the explicit refresh path after upgrading ctx.
+
+- `--cwd <path>` selects the project root.
+
+The block says to inspect live code first, use ctx only when authoritative references matter, narrow by labels and kinds, resolve dependency versions from real lockfiles or manifests, and treat missing evidence as unknown. It contains no memory or hook instructions.
 
 ### `ctx add <absolute-url>`
 
-Add a resource globally and prepare it. This command does not edit `.ctx/ctx.json`.
+Fetch and store a global resource.
 
-Behavior:
+- `--label <name>` supplies stable agent-visible routing metadata.
+- `--reason <text>` records why the reference is authoritative.
+- `--no-index` skips indexing for queryable resources.
+- `--max-pages <n>` and `--concurrency <n>` bound docs crawling.
+- `--cwd <path>` selects runtime context.
 
-- GitHub repo URL: resolve, pin, clone/cache globally
-- Docs URL: crawl, snapshot, index globally
-- Docs URL: include nearby `llms.txt` when present, then ordinary link crawling
-- research paper URL: resolve through the matching registry, snapshot paper metadata and available full text, index globally
-- Notes file URL: snapshot, index globally
-Flags:
+### `ctx link <target>` and `ctx unlink <target>`
 
-- `--label <name>`: stable resource name
-- `--reason <text>`: why this resource belongs in the global cache
-- `--no-index`: fetch/snapshot only
-- `--max-pages <n>`: maximum docs pages to crawl, default `256`
-- `--concurrency <n>`: docs crawl worker count, default `16`
-- `--cwd <path>`: project root override
+Add or remove a global resource from the current project manifest. `link --reason` can replace the global reason with a project-specific one.
 
-### `ctx link <label-or-url-or-id>`
+### `ctx update <target>`
 
-Link an existing global resource into the current project manifest.
-
-Flags:
-
-- `--reason <text>`: project-specific reason for linking this resource
-- `--cwd <path>`: project root override
-
-### `ctx update <label-or-url>`
-
-Refresh a docs, research paper, or notes resource from the project manifest when present, otherwise from global resources. Create a new immutable snapshot if content changed.
-
-For source resources, report the current pin. Changing source refs should be explicit.
-
-Flags:
-
-- `--force`: create a new snapshot even if the content hash did not change
-- `--max-pages <n>`: maximum docs pages to crawl, default `256`
-- `--concurrency <n>`: docs crawl worker count, default `16`
-- `--cwd <path>`: project root override
+Refresh docs, paper, or notes content and create a new immutable snapshot when changed. A source resource reports its current pin; changing source pins stays explicit.
 
 ### `ctx sync`
 
-Ensure every resource in `.ctx/ctx.json` exists locally and queryable resources are indexed. Missing GitHub source checkouts can be rebuilt from the manifest URL and current source pin. Docs, research-paper, and notes snapshots are timestamped cache artifacts; `ctx sync` verifies and can reindex them when present, but it does not recreate exact missing snapshots from the manifest alone.
-
-Flags:
-
-- `--reindex`: rebuild docs/research-paper/notes indexes
-- `--cwd <path>`: project root override
+Ensure linked resources exist locally. Recreate missing GitHub source checkouts from the manifest URL and pin. Verify existing snapshots, and reindex them with `--reindex`. Missing docs, paper, or notes snapshot content cannot be recreated exactly from the manifest alone.
 
 ### `ctx query "<question>"`
 
-Search docs, research papers, and notes. If a project manifest exists, search that project's linked queryable resources. Otherwise, search global queryable resources. Return several cited context blocks.
+Search docs, papers, and notes. With a manifest, search linked queryable resources; otherwise search global resources.
 
-Flags:
+- `--label <name>` restricts to one agent-visible label.
+- `--kind docs|research-paper|notes` restricts the resource kind.
+- `--top-k`, `--budget`, and `--debug` control result packing and diagnostics.
 
-- `--top-k <n>`: cited block count, default `5`
-- `--budget <tokens>`: context budget, default `20000`
-- `--debug`: include ranking details
-- `--label <name>`: restrict to one resource
-- `--kind docs|research-paper|notes`: restrict by kind
-- `--cwd <path>`: project root override
+Default results include matched evidence with nearby section context and stable citations. Debug output adds lexical/vector ranks and source-prior details.
 
-Retrieval uses code-aware lexical search plus semantic search, fused with reciprocal rank fusion. Chunks sourced from `llms.txt` get a small transparent retrieval prior after fusion so curated LLM context can break close ties without overriding stronger matches. Set `CTX_EMBEDDINGS=off` only for tests or constrained environments.
+### `ctx show [target]` and `ctx list`
 
-### `ctx remember <content>`
+Show the current project view or global resources, including labels, kinds, reasons, current pointers, and cache metadata. `show --snapshots` includes snapshot history. `list --project` limits output to linked resources.
 
-Store an explicit operational memory.
+### `ctx path <target>`
 
-Flags:
+Print the local cache path for a pinned source repository. Resolve through the project manifest when linked, otherwise through the global cache.
 
-- `--kind preference|fact|decision|recipe|warning`: memory kind
-- `--subject <text>`: stable subject or namespace
-- `--scope global|project|thread`: memory scope, default `project`
-- `--scope-key <text>`: explicit key, required for `thread`
-- `--trigger <text>`: optional condition that should surface this memory
-- `--suggested`: store as review-needed instead of active
-- `--tag <tag>`: repeatable tag
-- `--cwd <path>`: project root override
+### `ctx use <label> <pointer>`
 
-Memory content is stored as Markdown and indexed by section.
+Move a project manifest pointer to a cached source ref or known snapshot. Reject unknown pointers.
 
-### `ctx recall "<question>"`
+### `ctx remove <target>`
 
-Search active operational memories.
-
-Flags:
-
-- `--top-k <n>`: memory result count, default `5`
-- `--agent`: return grouped evidence sections for each memory
-- `--scope global|project|thread`: restrict recall to one scope
-- `--scope-key <text>`: explicit key for scoped recall
-- `--cwd <path>`: project root override
-
-Default recall includes global memories and the current project scope.
-
-### `ctx memory`
-
-Inspect or manage memories.
-
-Subcommands:
-
-- `ctx memory list`: list visible memories
-- `ctx memory show <id>`: show one memory and its sections
-- `ctx memory review`: list suggested memories
-- `ctx memory forget <id>`: mark a memory dismissed without deleting it
-
-### `ctx show [label-or-url]`
-
-Show current project state or global state. If a project manifest exists, no-target output shows that project view. Without a manifest, no-target output shows global resources.
-
-Flags:
-
-- `--snapshots`: include docs/research-paper/notes snapshot history
-- `--cwd <path>`: project root override
-
-### `ctx list`
-
-Show all globally cached resources with useful metadata.
-
-Flags:
-
-- `--project`: only resources linked by the current project
-- `--kind source|docs|research-paper|notes`: filter by kind
-- `--cwd <path>`: project root override for project-link annotations
-
-### `ctx path <label-or-github-url>`
-
-Print the local cache path for a pinned source repository. Resolves through the project manifest when present, otherwise through global resources.
-
-Flags:
-
-- `--cwd <path>`: project root override
-
-### `ctx use <label> <snapshot-or-ref>`
-
-Move the project manifest pointer for a resource.
-
-Use cases:
-
-- docs: set current snapshot
-- research paper: set current snapshot
-- notes: set current snapshot
-- source: switch pinned ref only when already cached/resolved
-
-Flags:
-
-- `--cwd <path>`: project root override
-
-### `ctx unlink <label-or-url-or-id>`
-
-Remove a resource from the current project manifest without deleting the global resource or cached files.
-
-Flags:
-
-- `--cwd <path>`: project root override
-
-### `ctx remove <label-or-url>`
-
-Remove a global resource entry. This does not edit any project manifest. Use `ctx unlink` for project manifests.
-
-Flags:
-
-- `--prune-cache`: also delete cached files
-- `--cwd <path>`: project root override
+Remove a global resource entry. `--prune-cache` also removes its cached files. This does not edit project manifests.
 
 ### `ctx doctor`
 
-Check manifest, cache paths, database access, and index readiness.
-
-Flags:
-
-- `--cwd <path>`: project root override
+Report manifest, database, cache, and local install health.
 
 ### `ctx install`
 
-Copy the current `ctx` executable into a user-local binary directory.
+Copy the current binary to `~/.local/bin` or `--bin-dir`, write install metadata, and install the bundled skill under `$CODEX_HOME/skills/ctx` or `~/.codex/skills/ctx`.
 
-Flags:
+## Retrieval behavior
 
-- `--bin-dir <path>`: override install directory; defaults to `~/.local/bin`
-- `--force`: replace an existing `ctx` binary
+Retrieval uses code-aware lexical candidates plus optional local embeddings, fused with reciprocal rank fusion. Labels are included in search metadata. `llms.txt` receives a small transparent source prior that may break close ties but must not override stronger matches.
 
-## Retrieval Output
-
-Default query output should include:
-
-- question
-- top-k
-- budget
-- project root
-- results
-
-Each result should include:
-
-- rank
-- kind
-- label
-- content
-- citation
-- url or file path
-- snapshot id for docs/research-paper/notes
-- source ref for source references when relevant
-- score
-
-`--debug` should add:
-
-- lexical rank and score
-- vector rank and score when available
-- fused rank and score
-- source prior and prior score when applied
-- matched tokens
-- chunk id
-- parent id
-
-## Docs Crawling
-
-Docs crawling is recursive and parallel. It follows same-origin links under the seed path, strips fragments and query strings, skips common static assets, and stores page-level citations in the snapshot.
-
-Default crawl limits:
-
-- max pages: `256`
-- concurrency: `16`
-
-Queries never update docs implicitly. `ctx update <label>` creates a new immutable snapshot when content changes.
-
-## Architecture
-
-Suggested Rust modules:
-
-```text
-cli        command parsing
-output     structured stdout encoding
-paths      project and global path resolution
-manifest   .ctx/ctx.json model and edits
-resolver   URL classification and resource resolution
-cache      global cache writes and reads
-github     GitHub source clone/pin behavior
-docs       docs crawl and snapshot behavior
-arxiv      arXiv research paper registry behavior
-notes      file URL snapshot behavior
-index      SQLite schema and indexing
-query      retrieval, fusion, packing
-agent      AGENTS.md block upsert
-doctor     health checks
-```
-
-Keep source/docs/research-paper/notes as distinct resource kinds even if they share storage helpers.
+Queries never refresh resources. Source trees are never presented as proof without live inspection. A fetched label or reason helps route evidence but does not establish authority by itself.

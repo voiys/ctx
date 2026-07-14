@@ -32,66 +32,6 @@ impl From<QueryKind> for ResourceKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum MemoryKind {
-    Preference,
-    Fact,
-    Decision,
-    Recipe,
-    Warning,
-}
-
-impl MemoryKind {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Preference => "preference",
-            Self::Fact => "fact",
-            Self::Decision => "decision",
-            Self::Recipe => "recipe",
-            Self::Warning => "warning",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum MemoryScope {
-    Global,
-    Project,
-    Thread,
-}
-
-impl MemoryScope {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Global => "global",
-            Self::Project => "project",
-            Self::Thread => "thread",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum MemoryStatus {
-    Suggested,
-    Active,
-    Dismissed,
-    Superseded,
-}
-
-impl MemoryStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Suggested => "suggested",
-            Self::Active => "active",
-            Self::Dismissed => "dismissed",
-            Self::Superseded => "superseded",
-        }
-    }
-}
-
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub(crate) struct Manifest {
     pub(crate) version: u32,

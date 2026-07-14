@@ -1,108 +1,91 @@
 # ctx
 
-`ctx` is a local-first context manager for coding agents.
+`ctx` is a small, local-first grounding CLI for coding agents. It keeps authoritative references close to the project: pinned upstream source, fetched documentation, research papers, and controlled notes.
 
-It pins source repositories, documentation snapshots, and notes globally, stores explicit operational memories, then lets projects opt into a curated `.ctx/ctx.json` view when they need one.
+The live repository remains the primary source of truth. ctx supplies external and historical evidence when live code alone is not enough.
 
-The guiding split is deliberate:
+## What ctx is good at
 
-- Source repositories are pinned and cached on disk. Agents explore them with normal code tools such as `rg`, file reads, and callpath tracing.
-- Documentation, notes, and research papers are snapshotted, indexed, and searched as LLM-ready context blocks. Notes are indexed as Markdown sections.
-- Memories are explicit scoped operational knowledge. Use `ctx remember` to write them and `ctx recall` to retrieve them.
-- Project state is optional. Without `.ctx/ctx.json`, commands use the global cache. With `.ctx/ctx.json`, queries default to that project's explicitly linked resources. Project manifests store portable resource intent and current pointers, not machine-local cache paths. Use `ctx link` and `ctx unlink` to edit the project view; `ctx add` always stores global references only.
+- Pinning a GitHub repository to a concrete commit and exposing its local checkout.
+- Fetching and indexing official documentation with stable snapshots and citations.
+- Capturing research papers and local Markdown notes as queryable references.
+- Giving references descriptive labels and project-specific reasons so agents can retrieve the right source quickly.
+- Linking a curated set of global references to a project through `.ctx/ctx.json`.
+- Restoring missing pinned source checkouts and reindexing snapshots with `ctx sync`.
+- Installing a `$ctx` skill and generating focused root `AGENTS.md` guidance.
 
-## V1 Shape
+ctx is not an agent memory system, hook framework, background service, or package manager. For dependency questions, inspect the project's real manifest or lockfile, resolve the exact installed version, then add or link that version's official docs or version-pinned source.
+
+## Efficient workflow
 
 ```sh
-ctx init
-ctx add https://github.com/owner/repo
-ctx add https://docs.example.com
-ctx add https://arxiv.org/abs/1706.03762
-ctx link <label>
-ctx query "how do retries work?"
-ctx query "how do retries work?" --label <docs-label>
-ctx query "how do retries work?" --debug
-ctx remember "Run cargo test before claiming parser fixes" --kind preference --subject test.workflow
-ctx recall "parser test workflow"
-ctx memory list
-ctx memory review
-ctx export ctx-personal.json
-ctx import ctx-personal.json --cwd /path/to/repo
-ctx list
-ctx show
-ctx path <label>
-ctx update <label>
-ctx sync
-ctx unlink <label>
-ctx remove <label>
-ctx doctor
-ctx install
+# Initialize the project manifest and generated AGENTS.md block.
+ctx init --cwd /path/to/repo
+
+# See what authoritative references are already linked.
+ctx show --cwd /path/to/repo
+
+# Add references globally with useful routing metadata.
+ctx add https://docs.example.com/v2 \
+  --label example-v2-docs \
+  --reason "official docs for the locked v2 dependency" \
+  --cwd /path/to/repo
+ctx add https://github.com/owner/repo/tree/v2.4.1 \
+  --label example-v2.4.1-source \
+  --reason "upstream source for the exact locked version" \
+  --cwd /path/to/repo
+
+# Curate them into the project view.
+ctx link example-v2-docs --reason "API behavior reference" --cwd /path/to/repo
+ctx link example-v2.4.1-source --reason "implementation reference" --cwd /path/to/repo
+
+# Query prose or inspect pinned source.
+ctx query "how are retries bounded?" --label example-v2-docs --cwd /path/to/repo
+ctx path example-v2.4.1-source --cwd /path/to/repo
+
+# Restore or verify linked references and refresh generated guidance.
+ctx sync --cwd /path/to/repo
+ctx agents --cwd /path/to/repo
 ```
 
-All command output is optimized for agent consumption. Human progress and diagnostics belong on stderr; structured results belong on stdout.
+Bare `ctx` and `ctx --help` print this workflow before the command reference.
 
-## Resource Model
+## Resource model
 
 `ctx add` accepts absolute URLs only.
 
-- `https://github.com/owner/repo` is a source repository.
-- `https://arxiv.org/abs/<id>` is a research paper from the arXiv registry.
-- Any other `http` or `https` URL is documentation.
-- `file:///absolute/path` may be used for notes.
+- `https://github.com/owner/repo[/tree/ref]` is a pinned source repository.
+- `https://arxiv.org/...` is a research paper.
+- Other `http` or `https` URLs are documentation.
+- `file:///absolute/path` is a controlled local note.
 
-Source repositories are pinned to a concrete ref and cached globally. `ctx sync` can rebuild a missing source checkout from a project manifest's GitHub URL and current pin. Documentation, research papers, and notes are captured as immutable snapshots with timestamps and content hashes; those snapshots are local cache entries, so a manifest alone cannot recreate them exactly on another machine.
+Source repositories are cached globally and explored with normal code tools such as `rg`. Documentation, papers, and notes are stored as immutable snapshots and searched as cited context blocks. A project manifest stores portable resource intent and current pointers, never machine-local cache paths.
 
-Notes are treated as controlled Markdown and indexed by section headings. Crawled docs and research papers keep the existing text chunking path.
+`ctx add` writes the global cache. `ctx link` and `ctx unlink` edit the project view. Without a project manifest, list, show, update, and query can operate on global resources.
 
-Memories are stored separately from resource snapshots. They support `global`, `project`, and `thread` scopes; project recall searches global memories plus the current project by default.
+## Bundled `$ctx` skill
 
-## Personal Export
+`ctx install` copies the binary and installs the bundled skill at `$CODEX_HOME/skills/ctx` or `~/.codex/skills/ctx`. Invoke it as `$ctx` when repository work depends on pinned upstream source, exact dependency versions, external documentation, research, or project notes. It intentionally does not trigger for every task.
 
-Use `ctx export <file>` and `ctx import <file>` to move personal state between machines.
-The export contains only memories and notes. It does not include linked project manifests, documentation crawls, cached source repositories, or embeddings.
+## Build and install locally
 
-Imported notes use `ctx-import://` source URLs so they cannot refresh from stale absolute paths. Imported memories and notes include a visible marker with the original export timestamp, import timestamp, and original scope or source path. Global memories stay global; project and thread memories are restored into the project passed with `--cwd` so they are immediately recallable on the new machine.
-
-## Build and Link Locally
-
-Install from a tagged checkout and build with the committed `Cargo.lock`.
-There is intentionally no `curl | bash` installer.
+Build from a tagged checkout with the committed lockfile. There is no `curl | bash` installer.
 
 ```sh
-git clone https://github.com/voiys/ctx.git
-cd ctx
-git checkout <version-tag>
 cargo fetch --locked
 make build
-mkdir -p ~/.local/bin
-ln -sf "$PWD/target/release/ctx" ~/.local/bin/ctx
+make install-local
 ctx --version
 ```
 
-Make sure `~/.local/bin` is on your `PATH`. If you prefer copying the binary
-instead of linking it, run `make install-local` from the tagged checkout.
-`ctx install` writes `ctx.install.json` next to the installed binary. `ctx doctor`
-reports when the default `~/.local/bin/ctx` install metadata is missing or older
-than the running checkout.
+`ctx install` writes `ctx.install.json` beside the installed binary. `ctx doctor` reports whether the default `~/.local/bin/ctx` install is missing or older than the running checkout.
 
-To prepare a new local release version:
-
-```sh
-make version VERSION=0.2.0
-cargo test
-make install-local
-```
-
-## Development Checks
+## Development checks
 
 ```sh
 make check
-cargo nextest run
+cargo nextest run --locked
 make bench-retrieval
 ```
 
-`make bench-retrieval` runs the small and large corpus retrieval benchmark described in `docs/retrieval-benchmark.md`.
-
-## Status
-
-This repository is a fresh implementation with the v1 core in place: global resources, optional project manifests, GitHub source caching, recursive docs snapshots, research paper snapshots with arXiv as the first registry, sectioned notes snapshots, explicit scoped memories, SQLite FTS indexing, local embeddings, RRF hybrid retrieval, global listing, cache pruning, pointer validation, and a local install command.
+See [docs/spec.md](docs/spec.md) for the command contract and [docs/architecture.md](docs/architecture.md) for module boundaries.

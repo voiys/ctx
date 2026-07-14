@@ -1,119 +1,66 @@
-# Architecture Notes
+# Architecture
 
-## Boundaries
+## Durable boundaries
 
-`ctx` has three durable boundaries:
+ctx has three durable boundaries:
 
 - Project manifest: `.ctx/ctx.json`
 - Global cache: `~/.ctx`
-- SQLite index: `~/.ctx/ctx.db`
+- SQLite retrieval index: `~/.ctx/ctx.db`
 
-The global cache is the source of stored references. A project manifest is an optional linked view that records project intent and current pointers, without machine-local cache paths. `ctx add` mutates global state; `ctx link` and `ctx unlink` mutate project state. The index is rebuildable local state.
+The global cache owns stored references. A project manifest is an optional curated view with labels, reasons, kinds, and current pointers. It never stores machine-local cache paths. The SQLite index is rebuildable local state.
 
-## Module Shape
-
-`ctx` uses small Rust modules instead of a framework-level dependency injection system.
+## Module shape
 
 ```text
 main.rs       process entrypoint
-app.rs        CLI command orchestration
-context.rs    AppContext, runtime paths, project readiness
-models.rs     shared durable and output types
-manifest.rs   .ctx/ctx.json reads, writes, selection helpers
+app.rs        CLI parsing and command orchestration
+context.rs    runtime paths and project readiness
+models.rs     resource, manifest, snapshot, and retrieval types
+manifest.rs   .ctx/ctx.json reads and edits
 input.rs      absolute URL classification
-source.rs     GitHub source clone/pin/path behavior
-crawl.rs      recursive bounded docs crawl
-arxiv.rs      arXiv research paper registry behavior
-markdown.rs   Markdown sectioning for controlled prose
-snapshot.rs   immutable docs/research-paper/notes snapshot writing
-storage.rs    SQLite schema, global resources, indexing, cache metadata
-retrieve.rs   lexical/vector retrieval, RRF, context packing
-embeddings.rs swappable embedding backend boundary
-memory.rs     explicit scoped memories, recall, grouped evidence
-agents.rs     AGENTS.md block management
-install.rs    local binary install command
-output.rs     TOON stdout encoding
+source.rs     GitHub source clone, pin, and path behavior
+crawl.rs      recursive bounded documentation crawl
+arxiv.rs      arXiv research-paper behavior
+markdown.rs   Markdown sectioning for controlled notes
+snapshot.rs   immutable docs, paper, and notes snapshots
+storage.rs    resource metadata and retrieval index
+retrieve.rs   lexical/vector retrieval, fusion, and context packing
+embeddings.rs swappable embedding backend
+agents.rs     generated AGENTS.md block management
+install.rs    local binary and bundled skill installation
+output.rs     structured TOON stdout
 util.rs       small shared helpers
 ```
 
-The intended layering is:
+The layering is:
 
 ```text
-CLI -> AppContext -> manifest/cache/index services -> concrete implementations
+CLI -> AppContext -> manifest/cache/index services -> filesystem, Git, HTTP, SQLite
 ```
 
-Only boundaries that are expected to change get a trait-like seam. Embeddings use `EmbeddingBackend` because local engines, external APIs, and disabled/BM25-only mode should be swappable without touching storage or retrieval command code.
+## Source and query paths
 
-Research paper registries use the same pattern: every registry implements the base paper snapshot behavior, while registries with native version semantics can also implement the optional versioned-registry capability.
+Source repositories are pinned code trees, not retrieval chunks. Agents call `ctx path <label>` and inspect the checkout with normal code tools. This preserves repository structure and real callpaths.
 
-## Source vs Retrieval
+Documentation, research papers, and notes form the query corpus. `ctx query` searches only those resource kinds and returns cited evidence blocks. Labels and kinds narrow retrieval before ranking.
 
-Source repositories are not RAG chunks in V1. They are pinned code trees.
+Docs, papers, and notes are immutable snapshots. `ctx update <label>` creates a new snapshot when content changes; queries never refresh resources implicitly. `ctx sync` can restore source checkouts from a manifest pin and reindex snapshots that still exist locally.
 
-Agents should use:
+## Grounding contract
 
-```sh
-ctx path <label>
-rg "symbol" "$(ctx path <label>)"
-```
+ctx is supporting evidence. The live project and runtime behavior win when evidence conflicts.
 
-Docs, research papers, and notes are the searchable retrieval corpus.
+For dependency-sensitive work, the agent reads the project's real manifest or lockfile, resolves the exact installed version, then links that version's official docs or pinned source. ctx deliberately does not implement a broad package-manager resolver.
 
-This keeps code exploration structural and lets `ctx query` focus on high-recall prose/context retrieval.
-
-Explicit memories are a separate operational corpus. `ctx recall` searches memories rather than mixing them into `ctx query` by default.
-
-## Retrieval Snapshots
-
-Docs and research paper registry pages are mutable on the internet, so `ctx` treats each crawl or paper capture as an immutable local snapshot. Notes are snapshotted the same way for consistent citations and rollbacks. Project manifests can point at these snapshots but do not contain enough information to reproduce an exact missing docs, paper, or notes snapshot on another machine.
-
-```text
-snapshot id = fetched timestamp + content fingerprint
-```
-
-`ctx update <label>` creates a new snapshot when content changes and moves the manifest's `current` pointer.
-
-Queries should never silently update a retrieval snapshot.
-
-Notes are controlled local prose, so indexing preserves Markdown section metadata: heading path, section order, parent/previous/next links, anchors, Markdown content, and plain text. Crawled docs and research papers keep the existing paragraph chunking path until their normalization is intentionally redesigned.
+The bundled `$ctx` skill and generated AGENTS.md block teach this workflow without requiring ctx on every task. `ctx agents` refreshes the generated block idempotently.
 
 ## Retrieval
 
-Target retrieval flow:
+Indexing stores parser-derived section metadata for controlled Markdown notes and paragraph chunks for crawled docs and papers. Lexical and optional vector candidates are fused with reciprocal rank fusion. `llms.txt` gets only a small transparent source prior after fusion.
 
-1. Load `.ctx/ctx.json` when present
-2. Select project docs/research-paper/notes resources, or global docs/research-paper/notes resources when no project exists
-3. Generate lexical candidates using code-aware tokens
-4. Generate vector candidates when embeddings exist
-5. Fuse candidates with reciprocal rank fusion
-6. Deduplicate by parent/resource
-7. Pack top results into the default budget
-8. Emit structured stdout
+Set `CTX_EMBEDDINGS=off` for tests or constrained environments. The default backend is local `fastembed`.
 
-Embeddings are generated during indexing through `EmbeddingBackend` and stored directly on chunks in SQLite. The default backend is `fastembed`; `CTX_EMBEDDINGS=off` selects the disabled backend. Query-time vector scoring runs over embedded chunks, then lexical and vector candidates are fused with reciprocal rank fusion. `llms.txt` chunks keep the same embeddings as normal docs chunks; the only special treatment is a small retrieval-time source prior after fusion.
+## Local install
 
-## Memories
-
-Memories are explicit, scoped records for operational knowledge:
-
-- `global`: applies everywhere
-- `project`: keyed by the canonical current project root
-- `thread`: keyed by an explicit thread id
-
-`ctx recall` searches active global memories plus the current project by default. `ctx recall --agent` groups matches by memory and returns matched sections plus nearby and between sections as evidence. Suggested memories are reviewable through `ctx memory review` but are not recalled by default.
-
-## Local Install
-
-Use:
-
-```sh
-make install-local
-```
-
-This runs a release build and then calls:
-
-```sh
-./target/release/ctx install --force
-```
-
-The install command copies the current executable to `~/.local/bin/ctx` by default.
+`make install-local` builds a locked release and runs `ctx install --force`. The install command copies the executable to `~/.local/bin/ctx` by default and installs the bundled skill under the active Codex home.

@@ -1,7 +1,6 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-
-use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow, bail};
 use rayon::prelude::*;
@@ -57,209 +56,9 @@ pub(crate) fn ensure_db(path: &Path) -> Result<()> {
             snapshot_id UNINDEXED,
             label UNINDEXED
         );
-        CREATE TABLE IF NOT EXISTS memories (
-            id TEXT PRIMARY KEY,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            scope TEXT NOT NULL,
-            scope_key TEXT,
-            kind TEXT NOT NULL,
-            status TEXT NOT NULL,
-            subject TEXT NOT NULL,
-            trigger TEXT,
-            content TEXT NOT NULL,
-            tags_json TEXT NOT NULL DEFAULT '[]',
-            confidence TEXT NOT NULL DEFAULT 'observed',
-            last_used_at TEXT,
-            confirmed_at TEXT,
-            expires_at TEXT,
-            supersedes_id TEXT,
-            embedding BLOB,
-            metadata_json TEXT NOT NULL DEFAULT '{}'
-        );
-        CREATE TABLE IF NOT EXISTS memory_sections (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            memory_id TEXT NOT NULL,
-            section_index INTEGER NOT NULL,
-            heading_path TEXT NOT NULL DEFAULT '[]',
-            heading_level INTEGER NOT NULL DEFAULT 0,
-            parent_section_index INTEGER,
-            previous_section_index INTEGER,
-            next_section_index INTEGER,
-            anchor TEXT,
-            markdown TEXT NOT NULL,
-            plain_text TEXT NOT NULL DEFAULT '',
-            content_hash TEXT NOT NULL DEFAULT '',
-            embedding BLOB,
-            FOREIGN KEY(memory_id) REFERENCES memories(id)
-        );
-        CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-            memory_id UNINDEXED,
-            section_index UNINDEXED,
-            subject,
-            trigger,
-            content,
-            tags
-        );
-        CREATE TABLE IF NOT EXISTS memory_evidence (
-            id TEXT PRIMARY KEY,
-            memory_id TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            source_type TEXT NOT NULL,
-            source_id TEXT,
-            uri TEXT,
-            role TEXT NOT NULL,
-            excerpt TEXT,
-            FOREIGN KEY(memory_id) REFERENCES memories(id)
-        );
-        CREATE TABLE IF NOT EXISTS scene_briefs (
-            id TEXT PRIMARY KEY,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            project_root TEXT NOT NULL,
-            scene_name TEXT NOT NULL,
-            summary TEXT NOT NULL,
-            heat REAL NOT NULL DEFAULT 0,
-            body_markdown TEXT NOT NULL,
-            source_memory_ids_json TEXT NOT NULL DEFAULT '[]',
-            status TEXT NOT NULL DEFAULT 'active',
-            metadata_json TEXT NOT NULL DEFAULT '{}'
-        );
-        CREATE INDEX IF NOT EXISTS idx_scene_briefs_project_status
-            ON scene_briefs(project_root, status, updated_at);
-        CREATE TABLE IF NOT EXISTS persona_profiles (
-            id TEXT PRIMARY KEY,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            project_root TEXT NOT NULL,
-            version INTEGER NOT NULL,
-            summary TEXT NOT NULL,
-            profile_markdown TEXT NOT NULL,
-            source_scene_ids_json TEXT NOT NULL DEFAULT '[]',
-            status TEXT NOT NULL DEFAULT 'active',
-            metadata_json TEXT NOT NULL DEFAULT '{}'
-        );
-        CREATE INDEX IF NOT EXISTS idx_persona_profiles_project_status
-            ON persona_profiles(project_root, status, version);
-        CREATE TABLE IF NOT EXISTS agent_sessions (
-            id TEXT PRIMARY KEY,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            host TEXT NOT NULL,
-            project_root TEXT NOT NULL,
-            session_key TEXT,
-            session_id TEXT,
-            status TEXT NOT NULL DEFAULT 'active',
-            metadata_json TEXT NOT NULL DEFAULT '{}'
-        );
-        CREATE TABLE IF NOT EXISTS hook_events (
-            id TEXT PRIMARY KEY,
-            created_at TEXT NOT NULL,
-            host TEXT NOT NULL,
-            event_name TEXT NOT NULL,
-            project_root TEXT NOT NULL,
-            session_key TEXT,
-            session_id TEXT,
-            payload_hash TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            redaction_version INTEGER NOT NULL DEFAULT 1,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            FOREIGN KEY(session_id) REFERENCES agent_sessions(id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_hook_events_project_created
-            ON hook_events(project_root, created_at);
-        CREATE INDEX IF NOT EXISTS idx_hook_events_session
-            ON hook_events(session_id, created_at);
-        CREATE TABLE IF NOT EXISTS conversation_messages (
-            id TEXT PRIMARY KEY,
-            event_id TEXT NOT NULL,
-            session_id TEXT,
-            created_at TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            content_hash TEXT NOT NULL,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            FOREIGN KEY(event_id) REFERENCES hook_events(id),
-            FOREIGN KEY(session_id) REFERENCES agent_sessions(id)
-        );
-        CREATE TABLE IF NOT EXISTS tool_events (
-            id TEXT PRIMARY KEY,
-            event_id TEXT NOT NULL,
-            session_id TEXT,
-            created_at TEXT NOT NULL,
-            tool_name TEXT,
-            tool_call_id TEXT,
-            input_summary TEXT,
-            output_summary TEXT,
-            status TEXT NOT NULL DEFAULT 'unknown',
-            duration_ms INTEGER,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            FOREIGN KEY(event_id) REFERENCES hook_events(id),
-            FOREIGN KEY(session_id) REFERENCES agent_sessions(id)
-        );
-        CREATE TABLE IF NOT EXISTS payload_blobs (
-            id TEXT PRIMARY KEY,
-            created_at TEXT NOT NULL,
-            content_hash TEXT NOT NULL,
-            media_type TEXT,
-            size_bytes INTEGER NOT NULL,
-            path TEXT NOT NULL,
-            redaction_version INTEGER NOT NULL DEFAULT 1,
-            metadata_json TEXT NOT NULL DEFAULT '{}'
-        );
-        CREATE TABLE IF NOT EXISTS offload_nodes (
-            id TEXT PRIMARY KEY,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            project_root TEXT,
-            session_id TEXT,
-            event_id TEXT,
-            kind TEXT NOT NULL,
-            title TEXT NOT NULL,
-            summary TEXT,
-            blob_id TEXT,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            FOREIGN KEY(session_id) REFERENCES agent_sessions(id),
-            FOREIGN KEY(event_id) REFERENCES hook_events(id),
-            FOREIGN KEY(blob_id) REFERENCES payload_blobs(id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_offload_nodes_project_created
-            ON offload_nodes(project_root, created_at);
-        CREATE TABLE IF NOT EXISTS offload_edges (
-            id TEXT PRIMARY KEY,
-            created_at TEXT NOT NULL,
-            session_id TEXT,
-            source_node_id TEXT NOT NULL,
-            target_node_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            FOREIGN KEY(session_id) REFERENCES agent_sessions(id),
-            FOREIGN KEY(source_node_id) REFERENCES offload_nodes(id),
-            FOREIGN KEY(target_node_id) REFERENCES offload_nodes(id)
-        );
-        CREATE TABLE IF NOT EXISTS memory_jobs (
-            id TEXT PRIMARY KEY,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            project_root TEXT NOT NULL,
-            session_id TEXT,
-            kind TEXT NOT NULL,
-            status TEXT NOT NULL,
-            objective TEXT NOT NULL,
-            evidence_json TEXT NOT NULL DEFAULT '[]',
-            result_schema_json TEXT NOT NULL DEFAULT '{}',
-            leased_at TEXT,
-            lease_owner TEXT,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            result_json TEXT,
-            error TEXT,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            FOREIGN KEY(session_id) REFERENCES agent_sessions(id)
-        );
         ",
     )?;
     ensure_chunk_columns(&conn)?;
-    ensure_offload_columns(&conn)?;
     Ok(())
 }
 
@@ -284,17 +83,6 @@ fn ensure_chunk_columns(conn: &Connection) -> Result<()> {
         if !has_column(name) {
             conn.execute(&format!("ALTER TABLE chunks ADD COLUMN {definition}"), [])?;
         }
-    }
-    Ok(())
-}
-
-fn ensure_offload_columns(conn: &Connection) -> Result<()> {
-    let columns = conn
-        .prepare("PRAGMA table_info(offload_nodes)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    if !columns.iter().any(|column| column == "project_root") {
-        conn.execute("ALTER TABLE offload_nodes ADD COLUMN project_root TEXT", [])?;
     }
     Ok(())
 }

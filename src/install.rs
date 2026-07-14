@@ -11,6 +11,8 @@ use crate::output::print_toon;
 use crate::util::{make_executable, timestamp};
 
 const INSTALL_METADATA_FILE: &str = "ctx.install.json";
+const CTX_SKILL: &str = include_str!("../skills/ctx/SKILL.md");
+const CTX_SKILL_METADATA: &str = include_str!("../skills/ctx/agents/openai.yaml");
 
 #[derive(Debug, Deserialize, Serialize)]
 struct InstallMetadata {
@@ -46,8 +48,9 @@ pub(crate) fn install(bin_dir: Option<PathBuf>, force: bool) -> Result<()> {
         target: target.display().to_string(),
     };
     write_install_metadata(&metadata_path, &metadata)?;
+    let skill_path = install_ctx_skill()?;
     let status = install_version_status(target_existed, previous.as_ref(), &metadata.version);
-    let notice = install_version_notice(&status, previous.as_ref(), &metadata.version);
+    let notice = install_version_notice(status, previous.as_ref(), &metadata.version);
     print_toon(CommandStatus {
         command: "install",
         status: "ok",
@@ -58,9 +61,29 @@ pub(crate) fn install(bin_dir: Option<PathBuf>, force: bool) -> Result<()> {
             "version": metadata.version,
             "previous_version": previous.map(|metadata| metadata.version),
             "install_version_status": status,
+            "skill_path": skill_path,
             "notice": notice,
         }),
     })
+}
+
+fn install_ctx_skill() -> Result<PathBuf> {
+    let codex_home = if let Some(path) = std::env::var_os("CODEX_HOME") {
+        PathBuf::from(path)
+    } else if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".codex")
+    } else {
+        UserDirs::new()
+            .ok_or_else(|| anyhow!("could not determine Codex home directory"))?
+            .home_dir()
+            .join(".codex")
+    };
+    let skill_dir = codex_home.join("skills").join("ctx");
+    let agents_dir = skill_dir.join("agents");
+    fs::create_dir_all(&agents_dir)?;
+    fs::write(skill_dir.join("SKILL.md"), CTX_SKILL)?;
+    fs::write(agents_dir.join("openai.yaml"), CTX_SKILL_METADATA)?;
+    Ok(skill_dir)
 }
 
 pub(crate) fn default_install_status() -> Result<serde_json::Value> {

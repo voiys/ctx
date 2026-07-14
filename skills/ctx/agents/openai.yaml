@@ -1,0 +1,4 @@
+interface:
+  display_name: "ctx authoritative grounding"
+  short_description: "Ground repo work in pinned source and fetched docs"
+  default_prompt: "Use $ctx to ground this task in the live repository and the smallest relevant set of authoritative references."
