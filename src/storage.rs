@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use rayon::prelude::*;
@@ -16,7 +17,7 @@ pub(crate) fn ensure_db(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let conn = Connection::open(path)?;
+    let conn = open_db(path)?;
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS resources (
@@ -56,10 +57,26 @@ pub(crate) fn ensure_db(path: &Path) -> Result<()> {
             snapshot_id UNINDEXED,
             label UNINDEXED
         );
+        CREATE TABLE IF NOT EXISTS ledgers (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            contents TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS ledgers_updated_at
+        ON ledgers(updated_at DESC);
         ",
     )?;
     ensure_chunk_columns(&conn)?;
     Ok(())
+}
+
+pub(crate) fn open_db(path: &Path) -> Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    Ok(conn)
 }
 
 fn ensure_chunk_columns(conn: &Connection) -> Result<()> {
@@ -111,7 +128,7 @@ fn index_pages(
     pages: &[SnapshotPage],
 ) -> Result<()> {
     ensure_db(db_path)?;
-    let mut conn = Connection::open(db_path)?;
+    let mut conn = open_db(db_path)?;
     let tx = conn.transaction()?;
     tx.execute(
         "DELETE FROM chunks WHERE resource_id = ?1 AND snapshot_id = ?2",
@@ -281,7 +298,7 @@ pub(crate) fn upsert_global_resource(
     snapshot: Option<&SnapshotMetadata>,
 ) -> Result<()> {
     ensure_db(db_path)?;
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     conn.execute(
         "INSERT INTO resources(id, label, kind, url, current, local_path, updated_at)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -323,7 +340,7 @@ pub(crate) fn upsert_global_resource(
 
 pub(crate) fn find_global_resource(db_path: &Path, target: &str) -> Result<Resource> {
     ensure_db(db_path)?;
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let resource = conn
         .query_row(
             "SELECT id, label, kind, url, current, local_path, updated_at
@@ -343,7 +360,7 @@ pub(crate) fn allowed_global_resource_ids(
     kind: Option<ResourceKind>,
 ) -> Result<BTreeSet<String>> {
     ensure_db(db_path)?;
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let mut stmt = conn.prepare("SELECT id, label, kind FROM resources")?;
     let rows = stmt.query_map([], |row| {
         Ok((
@@ -383,7 +400,7 @@ pub(crate) fn list_global_resources(
     db_path: &Path,
     kind: Option<ResourceKind>,
 ) -> Result<Vec<serde_json::Value>> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT r.id, r.label, r.kind, r.url, r.current, r.local_path, r.updated_at,
                 COUNT(s.snapshot_id) AS snapshot_count,
@@ -438,7 +455,7 @@ pub(crate) fn list_global_resource_models(
     kind: Option<ResourceKind>,
 ) -> Result<Vec<Resource>> {
     ensure_db(db_path)?;
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT id, label, kind, url, current, local_path, updated_at
          FROM resources
@@ -463,7 +480,7 @@ pub(crate) fn snapshots_for_resources(
     resources: &[Resource],
 ) -> Result<Vec<serde_json::Value>> {
     ensure_db(db_path)?;
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let mut out = Vec::new();
     for resource in resources {
         let mut stmt = conn.prepare(
@@ -510,7 +527,7 @@ pub(crate) fn current_content_hash(
     snapshot_id: &str,
 ) -> Result<Option<String>> {
     ensure_db(db_path)?;
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let hash = conn
         .query_row(
             "SELECT content_hash FROM snapshots WHERE resource_id = ?1 AND snapshot_id = ?2",
@@ -527,7 +544,7 @@ pub(crate) fn snapshot_path_for_pointer(
     snapshot_id: &str,
 ) -> Result<Option<String>> {
     ensure_db(db_path)?;
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let path = conn
         .query_row(
             "SELECT path FROM snapshots WHERE resource_id = ?1 AND snapshot_id = ?2",
@@ -556,7 +573,7 @@ pub(crate) fn remove_global_resource(
             let _ = fs::remove_dir(parent);
         }
     }
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     conn.execute(
         "DELETE FROM chunks_fts WHERE resource_id = ?1",
         params![resource.id],
@@ -620,4 +637,23 @@ fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
         chunks.push(current.trim().to_string());
     }
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::open_db;
+
+    #[test]
+    fn shared_connections_use_wal_and_five_second_busy_timeout() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = open_db(&home.path().join("ctx.db")).unwrap();
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        let busy_timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        assert_eq!(busy_timeout, 5000);
+    }
 }

@@ -43,6 +43,18 @@ For dependencies, prefer the exact version's official documentation or a source 
 
 Run `ctx sync --cwd <repo>` to restore missing pinned source checkouts and verify or reindex snapshots already present locally. Use `ctx update <label> --cwd <repo>` only when a fresh docs, research, or notes snapshot is intentionally needed.
 
+## Use an assigned global ledger
+
+Global ledgers are optional explicit coordination state. Keep thread coordination and delegation mechanics separate from ledger storage.
+
+1. A coordinator creates a ledger and includes its exact identifier in the task or goal.
+2. Read the named ledger with `ctx ledger show <id>` at task start and after a handoff when current shared state matters.
+3. Record confirmed decisions, ownership, blockers, evidence, and next actions. Do not store scratch reasoning, credentials, tokens, private content, or copied logs without a clear need.
+4. Before replacing a shared ledger after meaningful parallel work, read the current contents again. Then replace the full document with `ctx ledger write <id> --file <path>` or `ctx ledger write <id> --stdin`.
+5. Ledger contents can be stale. Live repository, runtime, database, and hosted state remain the authority.
+
+Do not create or use a ledger for ordinary grounding work unless coordination needs it or the task names one.
+
 ## Initialize or refresh project guidance
 
 - `ctx init --cwd <repo>` creates `.ctx/ctx.json` and writes the generated root `AGENTS.md` block.

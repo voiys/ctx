@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::Command as StdCommand;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use assert_cmd::Command;
 use serde_json::{Value, json};
@@ -135,6 +136,437 @@ fn split_toon_row(row: &str) -> Vec<String> {
     fields
 }
 
+fn toon_scalar(output: &[u8], key: &str) -> String {
+    let output = String::from_utf8(output.to_vec()).unwrap();
+    let prefix = format!("  {key}: ");
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("missing {key} in TOON output:\n{output}"))
+        .trim_matches('"')
+        .to_string()
+}
+
+fn create_ledger(project: &TestProject, title: &str) -> String {
+    let output = project
+        .ctx()
+        .args(["ledger", "create", title])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    toon_scalar(&output, "id")
+}
+
+#[test]
+fn ledger_help_exposes_nested_commands_and_write_inputs() {
+    let root = Command::cargo_bin("ctx")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(String::from_utf8(root).unwrap().contains("ledger"));
+
+    let ledger = Command::cargo_bin("ctx")
+        .unwrap()
+        .args(["ledger", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ledger = String::from_utf8(ledger).unwrap();
+    for command in ["create", "list", "show", "write"] {
+        assert!(ledger.contains(command), "{ledger}");
+    }
+
+    let write = Command::cargo_bin("ctx")
+        .unwrap()
+        .args(["ledger", "write", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let write = String::from_utf8(write).unwrap();
+    assert!(write.contains("--file"), "{write}");
+    assert!(write.contains("--stdin"), "{write}");
+}
+
+#[test]
+fn ledger_create_uses_readable_unique_ids_and_empty_global_documents() {
+    let project = TestProject::new();
+    let first = create_ledger(&project, "Job Sync review");
+    let second = create_ledger(&project, "Job Sync review");
+
+    assert!(first.starts_with("job-sync-review-20"), "{first}");
+    assert!(first.ends_with('Z'), "{first}");
+    assert_ne!(first, second);
+    assert!(second.starts_with(&first) || second.starts_with("job-sync-review-20"));
+    assert!(!project.root.path().join(".ctx/ctx.json").exists());
+
+    let shown = project
+        .ctx()
+        .args(["ledger", "show", &first])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let shown = String::from_utf8(shown).unwrap();
+    assert!(shown.contains("command: ledger_show"), "{shown}");
+    assert!(shown.contains("title: Job Sync review"), "{shown}");
+    assert!(shown.contains("contents: \"\""), "{shown}");
+}
+
+#[test]
+fn ledger_create_returns_metadata_without_echoing_document_fields() {
+    let project = TestProject::new();
+    let output = project
+        .ctx()
+        .args(["ledger", "create", "Metadata only"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(!output.contains("contents:"), "{output}");
+    assert!(!output.contains("content_bytes:"), "{output}");
+}
+
+#[test]
+fn ledger_commands_share_ctx_home_across_unrelated_working_directories() {
+    let project = TestProject::new();
+    let other = tempfile::tempdir().unwrap();
+    let id = create_ledger(&project, "Cross worktree");
+
+    let output = project
+        .ctx()
+        .current_dir(other.path())
+        .args(["ledger", "show", &id])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("Cross worktree")
+    );
+    assert!(!other.path().join(".ctx").exists());
+}
+
+#[test]
+fn ledger_write_preserves_exact_file_stdin_unicode_line_endings_and_empty_content() {
+    let project = TestProject::new();
+    let id = create_ledger(&project, "Exact markdown");
+    let file = project.root.path().join("ledger.md");
+    let file_contents = "# café\r\n\r\n- Zażółć 🧪\r\n";
+    fs::write(&file, file_contents.as_bytes()).unwrap();
+
+    let output = project
+        .ctx()
+        .args(["ledger", "write", &id, "--file"])
+        .arg(&file)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("command: ledger_write"), "{output}");
+    assert!(
+        output.contains(&format!("content_bytes: {}", file_contents.len())),
+        "{output}"
+    );
+    assert!(!output.contains(file_contents), "{output}");
+
+    let conn = rusqlite::Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let stored: String = conn
+        .query_row("SELECT contents FROM ledgers WHERE id = ?1", [&id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored.as_bytes(), file_contents.as_bytes());
+    let shown = project
+        .ctx()
+        .args(["ledger", "show", &id])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let shown = String::from_utf8(shown).unwrap();
+    assert!(
+        shown.contains("contents: \"# café\\r\\n\\r\\n- Zażółć 🧪\\r\\n\""),
+        "{shown}"
+    );
+
+    let stdin_contents = "## stdin\n\nδelta\n";
+    project
+        .ctx()
+        .args(["ledger", "write", &id, "--stdin"])
+        .write_stdin(stdin_contents)
+        .assert()
+        .success();
+    let stored: String = conn
+        .query_row("SELECT contents FROM ledgers WHERE id = ?1", [&id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored, stdin_contents);
+
+    project
+        .ctx()
+        .args(["ledger", "write", &id, "--stdin"])
+        .write_stdin("")
+        .assert()
+        .success();
+    let stored: String = conn
+        .query_row("SELECT contents FROM ledgers WHERE id = ?1", [&id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored, "");
+}
+
+#[test]
+fn ledger_list_is_updated_descending_and_reports_utf8_byte_lengths() {
+    let project = TestProject::new();
+    let first = create_ledger(&project, "First");
+    thread::sleep(Duration::from_millis(1100));
+    let second = create_ledger(&project, "Second");
+    thread::sleep(Duration::from_millis(1100));
+    project
+        .ctx()
+        .args(["ledger", "write", &first, "--stdin"])
+        .write_stdin("é")
+        .assert()
+        .success();
+
+    let output = project
+        .ctx()
+        .args(["ledger", "list"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("command: ledger_list"), "{output}");
+    assert!(
+        output.find(&first).unwrap() < output.find(&second).unwrap(),
+        "{output}"
+    );
+    assert!(output.contains(",2\n"), "{output}");
+}
+
+#[test]
+fn ledger_errors_reject_bad_inputs_without_changing_or_creating_documents() {
+    let project = TestProject::new();
+    let id = create_ledger(&project, "Keep me");
+    project
+        .ctx()
+        .args(["ledger", "write", &id, "--stdin"])
+        .write_stdin("original\n")
+        .assert()
+        .success();
+    let file = project.root.path().join("replacement.md");
+    fs::write(&file, "replacement\n").unwrap();
+    let invalid_utf8 = project.root.path().join("invalid.md");
+    fs::write(&invalid_utf8, [0xff, 0xfe]).unwrap();
+
+    project
+        .ctx()
+        .args(["ledger", "write", &id])
+        .assert()
+        .failure();
+    project
+        .ctx()
+        .args(["ledger", "write", &id, "--stdin", "--file"])
+        .arg(&file)
+        .write_stdin("replacement\n")
+        .assert()
+        .failure();
+    project
+        .ctx()
+        .args(["ledger", "write", &id, "--file"])
+        .arg(&invalid_utf8)
+        .assert()
+        .failure();
+    let output = project
+        .ctx()
+        .args(["ledger", "show", "missing-ledger"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("ledger not found: missing-ledger")
+    );
+    let output = project
+        .ctx()
+        .args(["ledger", "write", "missing-ledger", "--stdin"])
+        .write_stdin("new\n")
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("ledger not found: missing-ledger")
+    );
+
+    let conn = rusqlite::Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let stored: String = conn
+        .query_row("SELECT contents FROM ledgers WHERE id = ?1", [&id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM ledgers", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(stored, "original\n");
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn ledger_schema_migrates_idempotently_without_changing_existing_fts_data() {
+    let project = TestProject::new();
+    fs::create_dir_all(project.home.path()).unwrap();
+    let db = project.home.path().join("ctx.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE resources (id TEXT PRIMARY KEY, label TEXT NOT NULL, kind TEXT NOT NULL, url TEXT NOT NULL, current TEXT NOT NULL, local_path TEXT, updated_at TEXT NOT NULL);
+         CREATE TABLE snapshots (resource_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, kind TEXT NOT NULL, source_url TEXT NOT NULL, content_hash TEXT NOT NULL, fetched_at TEXT NOT NULL, page_count INTEGER NOT NULL, path TEXT NOT NULL, PRIMARY KEY(resource_id, snapshot_id));
+         CREATE TABLE chunks (id INTEGER PRIMARY KEY AUTOINCREMENT, resource_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL, source_url TEXT NOT NULL, chunk_index INTEGER NOT NULL, content TEXT NOT NULL, embedding BLOB);
+         CREATE VIRTUAL TABLE chunks_fts USING fts5(content, resource_id UNINDEXED, snapshot_id UNINDEXED, label UNINDEXED);
+         INSERT INTO chunks_fts(content, resource_id, snapshot_id, label) VALUES('sentinel token', 'r1', 's1', 'sentinel');",
+    )
+    .unwrap();
+    drop(conn);
+
+    for _ in 0..2 {
+        project.ctx().args(["ledger", "list"]).assert().success();
+    }
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let sentinel: String = conn
+        .query_row(
+            "SELECT content FROM chunks_fts WHERE chunks_fts MATCH 'sentinel'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let ledger_columns: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('ledgers')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let index_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'ledgers_updated_at'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let journal_mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(sentinel, "sentinel token");
+    assert_eq!(ledger_columns, 5);
+    assert_eq!(index_count, 1);
+    assert_eq!(journal_mode, "wal");
+}
+
+#[test]
+fn three_process_ledger_writes_are_atomic_while_a_reader_runs() {
+    let project = TestProject::new();
+    let id = create_ledger(&project, "Concurrent");
+    let markers = [
+        "# worker one\n\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n",
+        "# worker two\n\nBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\n",
+        "# worker three\n\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n",
+    ];
+    let executable = assert_cmd::cargo::cargo_bin!("ctx");
+    let home = project.home.path().to_path_buf();
+    let reader_id = id.clone();
+    let reader_executable = executable.to_path_buf();
+    let reader_home = home.clone();
+    let reader = thread::spawn(move || {
+        for _ in 0..20 {
+            let output = StdCommand::new(&reader_executable)
+                .env("CTX_HOME", &reader_home)
+                .env("CTX_EMBEDDINGS", "off")
+                .args(["ledger", "show", &reader_id])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    });
+    let writers = markers.map(|marker| {
+        let id = id.clone();
+        let home = home.clone();
+        let executable = executable.to_path_buf();
+        thread::spawn(move || {
+            let mut child = StdCommand::new(executable)
+                .env("CTX_HOME", home)
+                .env("CTX_EMBEDDINGS", "off")
+                .args(["ledger", "write", &id, "--stdin"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write as _;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(marker.as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        })
+    });
+    for writer in writers {
+        writer.join().unwrap();
+    }
+    reader.join().unwrap();
+
+    let conn = rusqlite::Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let final_contents: String = conn
+        .query_row("SELECT contents FROM ledgers WHERE id = ?1", [&id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(
+        markers.contains(&final_contents.as_str()),
+        "{final_contents:?}"
+    );
+}
+
 struct GitFixture {
     _remote: TempDir,
     git_config: std::path::PathBuf,
@@ -235,6 +667,11 @@ fn root_help_explains_the_efficient_grounding_workflow_before_usage() {
 #[test]
 fn init_and_agents_write_idempotent_grounding_guidance() {
     let project = TestProject::new();
+    fs::write(
+        project.root.path().join("AGENTS.md"),
+        "# User guidance\n\nKeep this exact line.\n",
+    )
+    .unwrap();
 
     project
         .ctx()
@@ -252,6 +689,13 @@ fn init_and_agents_write_idempotent_grounding_guidance() {
     assert!(agents.contains("ctx query \"<specific question>\" --label <label> --cwd <repo>"));
     assert!(agents.contains("manifest or lockfile"));
     assert!(agents.contains("ctx agents --cwd <repo>"));
+    assert!(agents.contains("ctx ledger show <id>"));
+    assert!(
+        agents.contains("confirmed decisions, ownership, blockers, evidence, and next actions")
+    );
+    assert!(agents.contains("read the current contents again"));
+    assert!(agents.contains("Ledger contents can be stale"));
+    assert!(agents.contains("Keep this exact line."));
     assert!(!agents.contains("memory"));
     assert!(!agents.contains("hook"));
 
@@ -265,6 +709,7 @@ fn init_and_agents_write_idempotent_grounding_guidance() {
     let agents = fs::read_to_string(agents_path).unwrap();
     assert_eq!(agents.matches("<!-- ctx:start -->").count(), 1);
     assert_eq!(agents.matches("<!-- ctx:end -->").count(), 1);
+    assert_eq!(agents.matches("Keep this exact line.").count(), 1);
 }
 
 #[cfg(unix)]
@@ -1211,6 +1656,10 @@ fn install_copies_binary_to_requested_bin_dir() {
     assert!(skill.contains("name: ctx"));
     assert!(skill.contains("Do not invoke for every task"));
     assert!(skill.contains("exact installed version"));
+    assert!(skill.contains("ctx ledger show <id>"));
+    assert!(skill.contains("confirmed decisions, ownership, blockers, evidence, and next actions"));
+    assert!(skill.contains("read the current contents again"));
+    assert!(skill.contains("Ledger contents can be stale"));
 }
 
 #[test]

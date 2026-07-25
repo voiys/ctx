@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use rayon::prelude::*;
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use serde_json::json;
 
 use crate::constants::{LLMS_TXT_SOURCE_PRIOR_SCORE, RRF_K};
@@ -11,6 +11,7 @@ use crate::embeddings::{
     EmbeddingBackend, EmbeddingService, bytes_to_embedding, cosine_similarity,
 };
 use crate::models::{CandidateBase, CandidateScore};
+use crate::storage::open_db;
 
 const AGENT_CONTEXT_WINDOW: i64 = 2;
 const AGENT_LEXICAL_ANCHOR_LIMIT: usize = 3;
@@ -43,7 +44,7 @@ fn lexical_candidates(
     if fts_query.is_empty() {
         return Ok(Vec::new());
     }
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT c.id, c.resource_id, c.snapshot_id, c.kind, c.label, c.source_url, c.chunk_index,
                 c.section_index, c.heading_path, c.heading_level, c.parent_section_index,
@@ -74,7 +75,7 @@ fn vector_candidates(
     allowed_resource_ids: &BTreeSet<String>,
     limit: usize,
 ) -> Result<Vec<(CandidateBase, f64)>> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT id, resource_id, snapshot_id, kind, label, source_url, chunk_index,
                 section_index, heading_path, heading_level, parent_section_index,
@@ -309,7 +310,7 @@ fn agent_anchor_candidates(
 }
 
 fn context_candidates(db_path: &Path, group: &AgentGroup) -> Result<Vec<CandidateBase>> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT id, resource_id, snapshot_id, kind, label, source_url, chunk_index,
                 section_index, heading_path, heading_level, parent_section_index,

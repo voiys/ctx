@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -16,6 +17,9 @@ use crate::constants::{
 use crate::context::AppContext;
 use crate::input::resolve_input;
 use crate::install::{default_install_status, install};
+use crate::ledger::{
+    create as create_ledger, list as list_ledgers, show as show_ledger, write as write_ledger,
+};
 use crate::manifest::{
     allowed_resource_ids, find_manifest_resource, find_manifest_resource_index, read_manifest,
     upsert_manifest_resource, write_manifest,
@@ -84,6 +88,11 @@ enum Commands {
     Agents {
         #[arg(long)]
         cwd: Option<PathBuf>,
+    },
+    /// Manage global coordination ledgers.
+    Ledger {
+        #[command(subcommand)]
+        command: LedgerCommands,
     },
     /// Add a source, docs, or notes URL to the global cache.
     Add {
@@ -202,6 +211,24 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum LedgerCommands {
+    /// Create an empty Markdown ledger.
+    Create { title: String },
+    /// List ledgers by most recent update.
+    List,
+    /// Show one ledger and its complete contents.
+    Show { id: String },
+    /// Replace one ledger's complete Markdown contents.
+    Write {
+        id: String,
+        #[arg(long, conflicts_with = "stdin", required_unless_present = "stdin")]
+        file: Option<PathBuf>,
+        #[arg(long, conflicts_with = "file", required_unless_present = "file")]
+        stdin: bool,
+    },
+}
+
 pub fn run() -> Result<()> {
     let mut args = env::args_os();
     let _program = args.next();
@@ -220,6 +247,7 @@ pub fn run() -> Result<()> {
     match command {
         Commands::Init { cwd, no_agents } => init(cwd, !no_agents),
         Commands::Agents { cwd } => agents(cwd),
+        Commands::Ledger { command } => ledger(command),
         Commands::Add {
             url,
             label,
@@ -279,6 +307,46 @@ pub fn run() -> Result<()> {
         } => remove(cwd, &target, prune_cache),
         Commands::Doctor { cwd } => doctor(cwd),
         Commands::Install { bin_dir, force } => install(bin_dir, force),
+    }
+}
+
+fn ledger(command: LedgerCommands) -> Result<()> {
+    let app = AppContext::load(None)?;
+    app.ensure_global_storage()?;
+    let db_path = &app.paths.db_path;
+    match command {
+        LedgerCommands::Create { title } => print_toon(CommandStatus {
+            command: "ledger_create",
+            status: "ok",
+            result: create_ledger(db_path, &title)?,
+        }),
+        LedgerCommands::List => print_toon(CommandStatus {
+            command: "ledger_list",
+            status: "ok",
+            result: json!({ "ledgers": list_ledgers(db_path)? }),
+        }),
+        LedgerCommands::Show { id } => print_toon(CommandStatus {
+            command: "ledger_show",
+            status: "ok",
+            result: show_ledger(db_path, &id)?,
+        }),
+        LedgerCommands::Write { id, file, stdin } => {
+            let contents = if let Some(path) = file {
+                fs::read_to_string(&path)
+                    .with_context(|| format!("failed to read ledger input {}", path.display()))?
+            } else if stdin {
+                let mut contents = String::new();
+                std::io::stdin().read_to_string(&mut contents)?;
+                contents
+            } else {
+                unreachable!("clap requires one ledger input source")
+            };
+            print_toon(CommandStatus {
+                command: "ledger_write",
+                status: "ok",
+                result: write_ledger(db_path, &id, contents)?,
+            })
+        }
     }
 }
 

@@ -13,6 +13,7 @@ The live repository remains the primary source of truth. ctx supplies external a
 - Linking a curated set of global references to a project through `.ctx/ctx.json`.
 - Restoring missing pinned source checkouts and reindexing snapshots with `ctx sync`.
 - Installing a `$ctx` skill and generating focused root `AGENTS.md` guidance.
+- Keeping an optional global Markdown ledger for explicit work across threads, repositories, and worktrees.
 
 ctx is not an agent memory system, hook framework, background service, or package manager. For dependency questions, inspect the project's real manifest or lockfile, resolve the exact installed version, then add or link that version's official docs or version-pinned source.
 
@@ -50,6 +51,20 @@ ctx agents --cwd /path/to/repo
 
 Bare `ctx` and `ctx --help` print this workflow before the command reference.
 
+## Global ledgers
+
+Ledgers are machine-local Markdown documents stored in the global `ctx.db`. They do not need a project manifest or link, and any working directory that uses the same `CTX_HOME` can access them.
+
+```sh
+ctx ledger create "Job Sync review"
+ctx ledger list
+ctx ledger show job-sync-review-20260725T214500Z
+ctx ledger write job-sync-review-20260725T214500Z --file ledger.md
+printf '# Current state\n' | ctx ledger write job-sync-review-20260725T214500Z --stdin
+```
+
+`write` replaces the full document and preserves exact UTF-8 text, including line endings and a final newline. Each write is atomic. Concurrent writers use last-completed-write-wins; ctx does not merge edits or keep revisions. Read the current ledger again before replacing it after meaningful parallel work. Live repository, runtime, database, and hosted state remain the authority when a ledger is stale.
+
 ## Resource model
 
 `ctx add` accepts absolute URLs only.
@@ -65,7 +80,7 @@ Source repositories are cached globally and explored with normal code tools such
 
 ## Bundled `$ctx` skill
 
-`ctx install` copies the binary and installs the bundled skill at `$CODEX_HOME/skills/ctx` or `~/.codex/skills/ctx`. Invoke it as `$ctx` when repository work depends on pinned upstream source, exact dependency versions, external documentation, research, or project notes. It intentionally does not trigger for every task.
+`ctx install` copies the binary and installs the bundled skill at `$CODEX_HOME/skills/ctx` or `~/.codex/skills/ctx`. Invoke it as `$ctx` when repository work depends on pinned upstream source, exact dependency versions, external documentation, research, project notes, or an assigned CTX ledger. It intentionally does not trigger for every task.
 
 ## Build and install locally
 
