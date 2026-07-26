@@ -690,11 +690,9 @@ fn init_and_agents_write_idempotent_grounding_guidance() {
     assert!(agents.contains("manifest or lockfile"));
     assert!(agents.contains("ctx agents --cwd <repo>"));
     assert!(agents.contains("ctx ledger show <id>"));
-    assert!(
-        agents.contains("confirmed decisions, ownership, blockers, evidence, and next actions")
-    );
-    assert!(agents.contains("read the current contents again"));
-    assert!(agents.contains("Ledger contents can be stale"));
+    assert!(agents.contains("confirmed decisions, owners, blockers, evidence, and next steps"));
+    assert!(agents.contains("read it again"));
+    assert!(agents.contains("A ledger may be out of date"));
     assert!(agents.contains("Keep this exact line."));
     assert!(!agents.contains("memory"));
     assert!(!agents.contains("hook"));
@@ -1657,9 +1655,9 @@ fn install_copies_binary_to_requested_bin_dir() {
     assert!(skill.contains("Do not invoke for every task"));
     assert!(skill.contains("exact installed version"));
     assert!(skill.contains("ctx ledger show <id>"));
-    assert!(skill.contains("confirmed decisions, ownership, blockers, evidence, and next actions"));
-    assert!(skill.contains("read the current contents again"));
-    assert!(skill.contains("Ledger contents can be stale"));
+    assert!(skill.contains("confirmed decisions, owners, blockers, evidence, and next steps"));
+    assert!(skill.contains("read it again"));
+    assert!(skill.contains("A ledger may be out of date"));
 }
 
 #[test]

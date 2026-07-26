@@ -13,7 +13,7 @@ The live repository remains the primary source of truth. ctx supplies external a
 - Linking a curated set of global references to a project through `.ctx/ctx.json`.
 - Restoring missing pinned source checkouts and reindexing snapshots with `ctx sync`.
 - Installing a `$ctx` skill and generating focused root `AGENTS.md` guidance.
-- Keeping an optional global Markdown ledger for explicit work across threads, repositories, and worktrees.
+- Keeping one shared Markdown note for work that spans threads, repositories, or worktrees.
 
 ctx is not an agent memory system, hook framework, background service, or package manager. For dependency questions, inspect the project's real manifest or lockfile, resolve the exact installed version, then add or link that version's official docs or version-pinned source.
 
@@ -53,7 +53,7 @@ Bare `ctx` and `ctx --help` print this workflow before the command reference.
 
 ## Global ledgers
 
-Ledgers are machine-local Markdown documents stored in the global `ctx.db`. They do not need a project manifest or link, and any working directory that uses the same `CTX_HOME` can access them.
+Ledgers are shared Markdown notes stored on this computer in the global `ctx.db`. You can use them from any folder that shares the same `CTX_HOME`. You do not need to set up or link a project.
 
 ```sh
 ctx ledger create "Job Sync review"
@@ -63,7 +63,7 @@ ctx ledger write job-sync-review-20260725T214500Z --file ledger.md
 printf '# Current state\n' | ctx ledger write job-sync-review-20260725T214500Z --stdin
 ```
 
-`write` replaces the full document and preserves exact UTF-8 text, including line endings and a final newline. Each write is atomic. Concurrent writers use last-completed-write-wins; ctx does not merge edits or keep revisions. Read the current ledger again before replacing it after meaningful parallel work. Live repository, runtime, database, and hosted state remain the authority when a ledger is stale.
+`write` replaces the whole note and keeps the text exactly as supplied. A reader never sees a half-written note. If two workers save at the same time, ctx keeps the write that finishes last. It does not merge changes or keep old versions. Read the ledger again before writing when someone else may have changed it. The ledger may be out of date, so check live code and services before acting on it.
 
 ## Resource model
 

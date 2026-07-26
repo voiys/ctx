@@ -2,14 +2,14 @@
 
 ## Durable boundaries
 
-ctx has four durable boundaries:
+ctx keeps four kinds of data:
 
 - Project manifest: `.ctx/ctx.json`
 - Global cache: `~/.ctx`
 - SQLite retrieval index: `~/.ctx/ctx.db`
-- Global ledgers: the `ledgers` table in `~/.ctx/ctx.db`
+- Shared ledgers: the `ledgers` table in `~/.ctx/ctx.db`
 
-The global cache owns stored references. A project manifest is an optional curated view with labels, reasons, kinds, and current pointers. It never stores machine-local cache paths. The SQLite index is rebuildable local state. Global ledgers are durable machine-local coordination documents and do not belong to a project or retrieval index.
+The global cache holds downloaded references. A project manifest lists the references that matter to one project. It never stores local cache paths. CTX can rebuild the SQLite search index. Ledgers are shared notes stored on this computer; they do not belong to a project or the search index.
 
 ## Module shape
 
@@ -41,7 +41,7 @@ The layering is:
 CLI -> AppContext -> manifest/cache/index services -> filesystem, Git, HTTP, SQLite
 ```
 
-Ledger commands take the shorter global path: `CLI -> AppContext -> ledger service -> SQLite`. They do not read or edit a project manifest and do not enter the FTS5 retrieval path.
+Ledger commands use the shorter global path: `CLI -> AppContext -> ledger service -> SQLite`. They do not read or change a project manifest or use FTS5 search.
 
 ## Source and query paths
 
@@ -67,9 +67,9 @@ Set `CTX_EMBEDDINGS=off` for tests or constrained environments. The default back
 
 ## SQLite and ledgers
 
-All shared SQLite connections use WAL mode and a five-second busy timeout. Schema setup adds the `ledgers` table and its descending `updated_at` index with idempotent `CREATE IF NOT EXISTS` statements while leaving the FTS5 tables and query flow intact.
+All shared SQLite connections use WAL mode and wait up to five seconds for a lock. Setup adds the `ledgers` table and an index for listing the newest updates first. Repeated setup is safe and does not change FTS5 search.
 
-Ledger create and full-document write operations use short immediate transactions. A write changes `contents` and `updated_at` together. SQLite serializes concurrent writers; readers can continue during a commit. CTX applies no retry loop, revision check, merge, history, search, archive, delete, or project-link layer. The accepted conflict rule is last-completed-write-wins.
+Create and write each use one short database change. A write changes `contents` and `updated_at` together. SQLite lets one writer save at a time while readers continue. CTX does not retry, merge, keep old versions, search ledgers, archive or delete them, or link them to projects. If two workers write at once, ctx keeps the write that finishes last.
 
 ## Local install
 

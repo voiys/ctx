@@ -7,7 +7,7 @@ ctx is a Rust CLI for grounding coding agents in authoritative references. It ma
 - pinned source repositories inspected on disk;
 - snapshotted documentation, research papers, and notes retrieved as cited context;
 - an optional project manifest that records which global references matter and why;
-- optional global Markdown ledgers for explicit local coordination;
+- optional global Markdown notes shared by local workers;
 - a bundled `$ctx` skill and generated root AGENTS.md guidance.
 
 Commands emit compact structured stdout. Progress and diagnostics use stderr.
@@ -126,21 +126,21 @@ Copy the current binary to `~/.local/bin` or `--bin-dir`, write install metadata
 
 ### `ctx ledger create <title>`
 
-Create an empty global Markdown ledger. The immutable identifier contains a normalized title slug and compact UTC creation time. A same-title, same-second collision gets random entropy instead of replacing or rejecting another ledger. Creation needs no project manifest, link, or `--cwd`.
+Create an empty global Markdown ledger. Its identifier combines a short form of the title with its UTC creation time and never changes. If two matching identifiers would be created in the same second, ctx adds random text so neither ledger is lost. This command needs no project manifest, link, or `--cwd`.
 
 ### `ctx ledger list`
 
-List all ledgers by `updated_at` descending. Each row includes the exact identifier, title, creation time, update time, and UTF-8 content byte length. An empty list is successful.
+List all ledgers, newest update first. Each row includes the exact identifier, title, creation time, update time, and content size in bytes. An empty list is successful.
 
 ### `ctx ledger show <id>`
 
-Return one ledger's metadata and complete Markdown contents. Identifiers must match exactly. A missing identifier returns a non-zero status.
+Return one ledger's title, timestamps, and full Markdown text. The identifier must match exactly. A missing identifier returns a non-zero status.
 
 ### `ctx ledger write <id> --file <path>|--stdin`
 
-Replace the complete document and update `updated_at` in one short transaction. Exactly one input source is required. Input must be UTF-8; empty input is valid. CTX preserves multiline content, Unicode, line endings, and final newlines. The result reports metadata and content byte length without echoing the document.
+Replace the whole document and update `updated_at` as one database change. Give exactly one input source. Input must be UTF-8; empty input is valid. CTX keeps multiline text, Unicode, line endings, and final newlines. The result reports the ledger details and content size without printing the document.
 
-Ledgers live in the existing global `ctx.db`. Database connections use WAL mode and a five-second busy timeout. SQLite serializes short writes; CTX does not add a retry loop. Concurrent replacement uses last-completed-write-wins, with no merge or revision check. Readers see one complete old or new document, never a partial write.
+Ledgers live in the existing global `ctx.db`. SQLite allows one writer at a time and lets readers continue while it saves. A writer waits up to five seconds for another writer, then fails with a clear error. CTX does not retry. If two workers replace one ledger, ctx keeps the write that finishes last. It does not merge changes or check versions. Readers see the whole old or new document, never part of each.
 
 The structured TOON commands are `ledger_create`, `ledger_list`, `ledger_show`, and `ledger_write`. Diagnostics stay on stderr. A failed input read, missing ledger, lock timeout, or commit leaves the stored document unchanged.
 

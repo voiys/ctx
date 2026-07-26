@@ -27,12 +27,12 @@ Use `ctx` when this task needs authoritative external or version-pinned referenc
 - `ctx sync --cwd <repo>` restores missing pinned source checkouts and verifies or reindexes linked snapshots already present locally.
 - Keep retrieval bounded: prefer one known label and a specific question over an unscoped global search. Treat missing evidence as unknown, and verify drift-prone claims against current primary sources.
 
-Global ledgers are optional explicit coordination state, separate from thread coordination and delegation:
+Global ledgers are shared notes for work that spans threads or workers. They do not manage those threads or workers:
 
 - A coordinator creates a ledger and gives workers its exact identifier. Read it with `ctx ledger show <id>` at task start and after a handoff when shared state matters.
-- Record confirmed decisions, ownership, blockers, evidence, and next actions. Do not store scratch reasoning, credentials, tokens, private content, or copied logs without a clear need.
-- Before replacing a ledger after meaningful parallel work, read the current contents again, then use `ctx ledger write <id> --file <path>` or `--stdin`.
-- Ledger contents can be stale. Live repository, runtime, database, and hosted state remain the authority.
+- Record confirmed decisions, owners, blockers, evidence, and next steps. Do not store scratch reasoning, credentials, tokens, private content, or copied logs without a clear need.
+- Before replacing a ledger when others may have changed it, read it again. Then use `ctx ledger write <id> --file <path>` or `--stdin`.
+- A ledger may be out of date. Check live code, databases, and services before acting on it.
 
 Run `ctx agents --cwd <repo>` to refresh this generated block after upgrading ctx.
 {AGENTS_BLOCK_END}"#
