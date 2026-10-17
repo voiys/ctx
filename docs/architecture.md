@@ -1,72 +1,70 @@
 # Architecture
 
-## Durable boundaries
+## Global boundaries
 
-ctx keeps three durable boundaries:
+ctx has a global filesystem cache (`~/.ctx` or `CTX_HOME`) and its SQLite index (`ctx.db`).
+No command reads repository state or initializes a project. Legacy `.ctx/ctx.json` files are ignored.
+Resources are addressed globally by label, URL or ID; labels distinguish versions and carry optional reasons.
+ctx is not an agent memory system.
 
-- Project manifest: `.ctx/ctx.json`
-- Global cache: `~/.ctx`
-- SQLite retrieval index: `~/.ctx/ctx.db`
-
-The global cache holds downloaded references. A project manifest lists the references that matter to one project. It never stores local cache paths. CTX can rebuild the SQLite search index.
-
-## Module shape
+## Modules
 
 ```text
 main.rs       process entrypoint
-app.rs        CLI parsing and command orchestration
-context.rs    runtime paths and project readiness
-models.rs     resource, manifest, snapshot, and retrieval types
-manifest.rs   .ctx/ctx.json reads and edits
+app.rs        nine-command CLI orchestration and embedded guide dispatch
+context.rs    global cache/index paths and readiness
+models.rs     resource, snapshot and retrieval types
 input.rs      absolute URL classification
-source.rs     GitHub source clone, pin, and path behavior
-crawl.rs      recursive bounded documentation crawl
-arxiv.rs      arXiv research-paper behavior
-markdown.rs   Markdown plain-text extraction for indexing
-snapshot.rs   immutable docs and paper snapshots
-storage.rs    shared SQLite setup, resource metadata, and retrieval index
-retrieve.rs   lexical/vector retrieval, fusion, and context packing
-embeddings.rs swappable embedding backend
-agents.rs     generated AGENTS.md block management
-install.rs    local binary and bundled skill installation
-output.rs     structured TOON stdout
-util.rs       small shared helpers
+source.rs     GitHub clone, exact-pointer fetch and checkout caching
+crawl.rs      bounded recursive documentation crawl
+arxiv.rs      arXiv metadata/full-text fetching
+markdown.rs   plain-text extraction
+snapshot.rs   immutable documentation/paper snapshots
+storage.rs    SQLite migration, resources, snapshots and chunk indexing
+retrieve.rs   lexical/vector candidates, fusion and context packing
+embeddings.rs embedding backend
+install.rs    executable and installation metadata only
+output.rs     TOON serialization
+util.rs       shared helpers
 ```
 
-The layering is:
+The callpath is CLI → AppContext → cache/index services → filesystem, Git, HTTP and SQLite.
+Commands: add, list, path, query, update, remove, doctor, install, guides.
+Use command help for examples; guides are eight Markdown files embedded with `include_str!` and printed verbatim.
+No guide installation or generated repository guidance is needed.
 
-```text
-CLI -> AppContext -> manifest/cache/index services -> filesystem, Git, HTTP, SQLite
-```
+## Source-first path
 
-## Source and query paths
+Resolve the installed version from the live repository's manifest/lockfile before adding upstream source.
+Source add preserves the input URL, with an ID based on clone URL plus label. Resolve tags/branches via shallow
+clone; a 40-lowercase-hex SHA uses the existing explicit-pointer cache/fetch path. Source pins have no snapshots
+or chunks. `path` prints the checkout for normal code tools; cite file:line @ SHA. Never edit cached references.
 
-The three resource kinds are `source`, `docs`, and `research_paper`.
+Add classifies input and looks up the label before any network operation. A conflicting URL fails. An existing
+matching path returns `existing: true`; otherwise it is fetched again. Reasons are stored in resources using
+an ALTER-if-missing migration following the existing column migration pattern. COALESCE preserves omitted reasons.
+Existing databases and chunk schemas remain compatible. Pre-existing duplicate labels resolve to the first row.
 
-Source repositories are pinned code trees, not retrieval chunks. Agents call `ctx path <label>` and inspect the checkout with normal code tools. This preserves repository structure and real callpaths.
+## Docs, papers and retrieval
 
-Documentation and research papers form the query corpus. `ctx query` searches only those resource kinds and returns cited evidence blocks. Labels and kinds narrow retrieval before ranking.
+Add always snapshots/indexes docs and papers. Update compares hashes; no-op updates preserve current, while changed
+or forced updates write/index a new snapshot. Sources report their existing pin. Queries never refresh implicitly.
 
-Docs and papers are immutable snapshots. `ctx update <label>` creates a new snapshot when content changes; queries never refresh resources implicitly. `ctx sync` can restore source checkouts from a manifest pin and reindex snapshots that still exist locally.
+Storage validates each repeated query label and builds the OR union, intersected with kind. It returns eligible
+`(resource_id, snapshot_id)` pairs: current snapshots by default, or a single explicitly requested snapshot ID.
+An explicit ID must exist on an allowed resource, otherwise selection fails. Lexical/vector candidate membership
+checks compare both IDs. Historical chunks remain indexed but cannot leak into the default latest-snapshot search.
 
-## Grounding contract
+Retrieval preserves paragraph chunking, optional local-vector search, reciprocal rank fusion, transparent llms.txt
+source prior, budget and per-snapshot context expansion. Results are evidence blocks with citations and local context,
+not whole-document summaries. `--debug` exposes ranking details; `CTX_EMBEDDINGS=off` disables vectors.
 
-ctx is supporting evidence. The live project and runtime behavior win when evidence conflicts.
+## Restoration and installation
 
-For dependency-sensitive work, the agent reads the project's real manifest or lockfile, resolves the exact installed version, pins upstream source, then uses `ctx path` and `rg` to read source, tests, and examples. Documentation queries are a fallback. ctx deliberately does not implement a broad package-manager resolver.
+Keep exact `ctx add` lines in a script or README. Re-running cached label/URL pairs is idempotent; explicit SHA URLs
+restore exact source commits. Use URLs shown by list: a tag URL and its corresponding SHA URL are different stored URLs.
+Docs and papers restore as fresh fetches, not historical snapshots. List can display retained snapshot history;
+query can target an older snapshot without moving current.
 
-The bundled `$ctx` skill and generated AGENTS.md block teach this workflow without requiring ctx on every task. `ctx agents` refreshes the generated block idempotently.
-
-## Retrieval
-
-Indexing stores paragraph chunks for crawled docs and papers. Lexical and optional vector candidates are fused with reciprocal rank fusion. `llms.txt` gets only a small transparent source prior after fusion.
-
-Set `CTX_EMBEDDINGS=off` for tests or constrained environments. The default backend is local `fastembed`.
-
-## SQLite
-
-All shared SQLite connections use WAL mode and wait up to five seconds for a lock.
-
-## Local install
-
-`make install-local` builds a locked release and runs `ctx install --force`. The install command copies the executable to `~/.local/bin/ctx` by default and installs the bundled skill under the active Codex home.
+Remove deletes resource/index records and can prune current cached files. Doctor checks global storage and installation
+metadata. Install copies only the executable and ctx.install.json; it does not install workflows or modify repositories.

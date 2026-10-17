@@ -1,90 +1,94 @@
 # ctx
 
-`ctx` is a small, local-first grounding CLI for coding agents. It keeps authoritative references close to the project: pinned upstream source, fetched documentation, and research papers.
+Pin upstream source and read it with `rg` before falling back to searchable docs and papers.
+ctx pulls references into a global offline cache under `~/.ctx` (or `CTX_HOME`).
+The live repository and its runtime behavior remain the primary source of truth.
 
-The live repository remains the primary source of truth. ctx supplies external and historical evidence when live code alone is not enough.
+ctx is not an agent memory system, hook framework, background service, or package manager.
+Resolve exact dependency versions from the real manifest or lockfile; do not guess.
 
-## What ctx is good at
-
-- Pinning a GitHub repository to a concrete commit and exposing its local checkout.
-- Fetching and indexing official documentation with stable snapshots and citations.
-- Capturing research papers as queryable references.
-- Giving references descriptive labels and project-specific reasons so agents can retrieve the right source quickly.
-- Linking a curated set of global references to a project through `.ctx/ctx.json`.
-- Restoring missing pinned source checkouts and reindexing snapshots with `ctx sync`.
-- Installing a `$ctx` skill and generating focused root `AGENTS.md` guidance.
-
-ctx is not an agent memory system, hook framework, background service, or package manager. For dependency questions, inspect the project's real manifest or lockfile, resolve the exact installed version, then pin → ctx path → rg source/tests first; use official documentation as fallback. Do not guess versions.
-
-## Efficient workflow
+## Source-first workflow
 
 ```sh
-# Initialize the project manifest and generated AGENTS.md block.
-ctx init --cwd /path/to/repo
+ctx add https://github.com/clap-rs/clap/tree/v4.6.1 \
+  --label clap-4.6.1-src --reason 'upstream source for the locked version'
+SRC=$(ctx path clap-4.6.1-src)
+rg -n 'ArgAction' "$SRC/clap_builder/src"
+git -C "$SRC" rev-parse HEAD
 
-# See what authoritative references are already linked.
-ctx show --cwd /path/to/repo
-
-# Add references globally with useful routing metadata.
-ctx add https://docs.example.com/v2 \
-  --label example-v2-docs \
-  --reason "official docs for the locked v2 dependency" \
-  --cwd /path/to/repo
-ctx add https://github.com/owner/repo/tree/v2.4.1 \
-  --label example-v2.4.1-source \
-  --reason "upstream source for the exact locked version" \
-  --cwd /path/to/repo
-
-# Curate them into the project view.
-ctx link example-v2-docs --reason "API behavior reference" --cwd /path/to/repo
-ctx link example-v2.4.1-source --reason "implementation reference" --cwd /path/to/repo
-
-# Query prose or inspect pinned source.
-ctx query "how are retries bounded?" --label example-v2-docs --cwd /path/to/repo
-ctx path example-v2.4.1-source --cwd /path/to/repo
-
-# Restore or verify linked references and refresh generated guidance.
-ctx sync --cwd /path/to/repo
-ctx agents --cwd /path/to/repo
+# Documentation is a fallback when source is unavailable or insufficient.
+ctx add https://docs.rs/clap/4.6.1/clap/ --label clap-docs --reason 'official API docs'
+ctx query 'repeatable arguments' --label clap-docs
+ctx guides
+ctx guides pin
 ```
 
-Bare `ctx` and `ctx --help` print this workflow before the command reference.
+Cite `file:line @ SHA` for source evidence. Treat cached source as read-only; never edit or import from it.
+Unscoped query is discovery, not proof. Prefer specific questions and known labels.
 
-## Resource model
+## Nine commands
 
-`ctx add` accepts absolute HTTP(S) URLs only, with three resource kinds: `source`, `docs`, and `research_paper`.
+| Command | Purpose |
+| --- | --- |
+| `add <url>` | Cache a source pin, documentation site, or arXiv paper; store optional `--reason`. |
+| `list [target]` | List global resources/reasons; filter with `--kind`, inspect history with `--snapshots`. |
+| `path <target>` | Print a cached source checkout path (sources only). |
+| `query <question>` | Search docs/papers, optionally with repeated `--label`, `--kind`, or `--snapshot <id>`. |
+| `update <target>` | Refresh docs/papers; sources report their existing pin. |
+| `remove <target>` | Remove resource/index records; `--prune-cache` also removes current cached files. |
+| `doctor` | Check global cache/index health and binary installation metadata. |
+| `install` | Copy the binary and `ctx.install.json`; no workflow files are installed. |
+| `guides [name]` | List or print eight embedded source-first Markdown workflows. |
 
-- `https://github.com/owner/repo[/tree/ref]` is a pinned source repository.
-- `https://arxiv.org/...` is a research paper.
-- Other `http` or `https` URLs are documentation.
+Bare `ctx` and `ctx --help` show the short workflow. Use `ctx <command> --help` for examples.
 
-Source repositories are cached globally and explored with normal code tools such as `rg`. Documentation and papers are stored as immutable snapshots and searched as cited context blocks. A project manifest stores portable resource intent and current pointers, never machine-local cache paths.
+## Stateless resources and restoration
 
-`ctx add` writes the global cache. `ctx link` and `ctx unlink` edit the project view. Without a project manifest, list, show, update, and query can operate on global resources.
+All commands address the global cache by label, URL, or ID; query narrows resources by label/kind.
+There is no project setup or project state. Legacy `.ctx/ctx.json` files are ignored, even invalid ones.
+Use one label per version: different versions are different resources.
 
-## Bundled `$ctx` skill
+`add` looks up the label before any network access. The same stored URL and an existing cached path
+return `existing: true`; an optional reason replaces the previous reason. Omitting reason preserves it.
+A label already associated with a different URL is an error. Use `update` to refresh cached docs/papers.
+GitHub `/tree/<tag-or-branch>` pins the resolved commit; `/tree/<40-lowercase-hex-sha>` restores an exact commit.
+Source pins are code checkouts, not indexed retrieval chunks.
 
-`ctx install` copies the binary and installs the bundled skill at `$CODEX_HOME/skills/ctx` or `~/.codex/skills/ctx`. Invoke it as `$ctx` when repository work depends on pinned upstream source, exact dependency versions, external documentation, or research papers. It intentionally does not trigger for every task. Resolve the exact installed version, pin it, then use `ctx path` and `rg` on upstream source, tests, and examples before querying docs. The skill covers idiomatic usage, copying patterns, tests as specification, API tracing, error diagnosis, upgrade impact, and optional upstream history.
+Keep your exact `ctx add` lines in a shell script or README to restore on another machine.
+Use the URL displayed by `ctx list`: replacing a tag URL with its SHA URL under the same label is a conflict.
+Docs/papers restore as a fresh crawl/fetch, not as their original snapshots.
 
-## Build and install locally
+## Snapshots and retrieval
 
-Build from a tagged checkout with the committed lockfile. There is no `curl | bash` installer.
+Docs and papers are indexed on add. Updates create a new immutable snapshot when content changes
+(or with `--force`); queries never refresh implicitly. Old snapshots remain cached and indexed.
+By default, query searches only each resource's latest (`current`) snapshot. Repeated labels are OR;
+kind and snapshot are AND filters. Every requested label must match a queryable resource.
 
 ```sh
-cargo fetch --locked
-make build
-make install-local
-ctx --version
+ctx list clap-docs --snapshots
+ctx query 'old API' --label clap-docs --snapshot <snapshot_id>
+ctx query 'shared topic' --label docs-a --label docs-b --kind docs
 ```
 
-`ctx install` writes `ctx.install.json` beside the installed binary. `ctx doctor` reports whether the default `~/.local/bin/ctx` install is missing or older than the running checkout.
+An unknown or filtered-out snapshot is an error. Sources cannot be queried; use `path` and normal code tools.
+Results are matched chunks with local context and citations, not whole-document summaries.
+Lexical and optional local-vector retrieval are fused; `--debug` exposes ranking details.
+Set `CTX_EMBEDDINGS=off` to disable embeddings.
 
-## Development checks
+`add` accepts absolute HTTP(S) URLs only: GitHub repositories, arXiv papers, and other URLs as docs.
+Docs crawling defaults to at most 2048 pages and caps each page at 5 MiB; `--max-pages` and
+`--concurrency` bound crawling, not completeness. Run `ctx guides` for the eight detailed workflows.
+
+## Development
 
 ```sh
-make check
-cargo nextest run --locked
-make bench-retrieval
+export PATH=$HOME/.cargo/bin:$PATH CTX_EMBEDDINGS=off
+cargo fmt --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked
+cargo build --release --locked
+CTX_HOME=$PWD/target/ctx-home ./target/release/ctx guides
 ```
 
-See [docs/spec.md](docs/spec.md) for the command contract and [docs/architecture.md](docs/architecture.md) for module boundaries.
+Ignored tests retain optional embedding-download and live-network smoke coverage.
