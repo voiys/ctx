@@ -26,7 +26,6 @@ impl TestProject {
     fn ctx(&self) -> Command {
         let mut command = Command::cargo_bin("ctx").unwrap();
         command.env("CTX_HOME", self.home.path());
-        command.env("CODEX_HOME", self.home.path().join(".codex"));
         command.env("CTX_EMBEDDINGS", "off");
         command
     }
@@ -1251,17 +1250,8 @@ fn install_copies_binary_to_requested_bin_dir() {
     let metadata: Value =
         serde_json::from_str(&fs::read_to_string(metadata_path).unwrap()).unwrap();
     assert_eq!(metadata["version"], env!("CARGO_PKG_VERSION"));
-    let skill_dir = project.home.path().join(".codex/skills/ctx");
-    assert!(skill_dir.join("SKILL.md").exists());
-    assert!(skill_dir.join("agents/openai.yaml").exists());
-    let skill = fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
-    assert!(skill.contains("name: ctx"));
-    assert!(skill.contains("Do not invoke for every task"));
-    assert!(skill.contains("exact installed version"));
-    assert!(skill.contains("ctx path"));
-    assert!(skill.contains("tests-as-spec"));
-    assert!(skill.contains("upgrade-impact"));
-    assert!(skill.contains("why-history"));
+    assert!(!project.home.path().join(".codex/skills").exists());
+    assert!(!output.contains("skill_path"));
 }
 
 #[test]
