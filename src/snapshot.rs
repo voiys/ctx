@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde_json::Value;
 
 use crate::crawl::crawl_docs;
@@ -18,26 +18,6 @@ pub(crate) fn snapshot_docs(
     eprintln!("crawling docs: {url}");
     let pages = crawl_docs(url, max_pages, concurrency)?;
     write_snapshot_pages(home, ResourceKind::Docs, resource_id, url, pages)
-}
-
-pub(crate) fn snapshot_notes(
-    home: &Path,
-    resource_id: &str,
-    url: &str,
-    path: &Path,
-) -> Result<SnapshotMetadata> {
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("failed to read notes file {}", path.display()))?;
-    write_snapshot_pages(
-        home,
-        ResourceKind::Notes,
-        resource_id,
-        url,
-        vec![SnapshotPage {
-            url: url.to_string(),
-            content: text,
-        }],
-    )
 }
 
 pub(crate) fn write_snapshot_pages(
@@ -76,7 +56,6 @@ pub(crate) fn write_snapshot_pages_with_extra(
     let snapshot_id = format!("{}-{}", fetched_at.replace([':', '-'], ""), &hash[..12]);
     let root = match kind {
         ResourceKind::Docs => home.join("docs"),
-        ResourceKind::Notes => home.join("notes"),
         ResourceKind::ResearchPaper => home.join("research_papers"),
         ResourceKind::Source => bail!("source snapshots are not supported"),
     };

@@ -1,6 +1,6 @@
 # ctx
 
-`ctx` is a small, local-first grounding CLI for coding agents. It keeps authoritative references close to the project: pinned upstream source, fetched documentation, research papers, and controlled notes.
+`ctx` is a small, local-first grounding CLI for coding agents. It keeps authoritative references close to the project: pinned upstream source, fetched documentation, and research papers.
 
 The live repository remains the primary source of truth. ctx supplies external and historical evidence when live code alone is not enough.
 
@@ -8,7 +8,7 @@ The live repository remains the primary source of truth. ctx supplies external a
 
 - Pinning a GitHub repository to a concrete commit and exposing its local checkout.
 - Fetching and indexing official documentation with stable snapshots and citations.
-- Capturing research papers and local Markdown notes as queryable references.
+- Capturing research papers as queryable references.
 - Giving references descriptive labels and project-specific reasons so agents can retrieve the right source quickly.
 - Linking a curated set of global references to a project through `.ctx/ctx.json`.
 - Restoring missing pinned source checkouts and reindexing snapshots with `ctx sync`.
@@ -53,20 +53,19 @@ Bare `ctx` and `ctx --help` print this workflow before the command reference.
 
 ## Resource model
 
-`ctx add` accepts absolute URLs only.
+`ctx add` accepts absolute HTTP(S) URLs only, with three resource kinds: `source`, `docs`, and `research_paper`.
 
 - `https://github.com/owner/repo[/tree/ref]` is a pinned source repository.
 - `https://arxiv.org/...` is a research paper.
 - Other `http` or `https` URLs are documentation.
-- `file:///absolute/path` is a controlled local note.
 
-Source repositories are cached globally and explored with normal code tools such as `rg`. Documentation, papers, and notes are stored as immutable snapshots and searched as cited context blocks. A project manifest stores portable resource intent and current pointers, never machine-local cache paths.
+Source repositories are cached globally and explored with normal code tools such as `rg`. Documentation and papers are stored as immutable snapshots and searched as cited context blocks. A project manifest stores portable resource intent and current pointers, never machine-local cache paths.
 
 `ctx add` writes the global cache. `ctx link` and `ctx unlink` edit the project view. Without a project manifest, list, show, update, and query can operate on global resources.
 
 ## Bundled `$ctx` skill
 
-`ctx install` copies the binary and installs the bundled skill at `$CODEX_HOME/skills/ctx` or `~/.codex/skills/ctx`. Invoke it as `$ctx` when repository work depends on pinned upstream source, exact dependency versions, external documentation, research, project notes. It intentionally does not trigger for every task.
+`ctx install` copies the binary and installs the bundled skill at `$CODEX_HOME/skills/ctx` or `~/.codex/skills/ctx`. Invoke it as `$ctx` when repository work depends on pinned upstream source, exact dependency versions, external documentation, research. It intentionally does not trigger for every task.
 
 ## Build and install locally
 

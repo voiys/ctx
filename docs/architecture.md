@@ -22,8 +22,8 @@ input.rs      absolute URL classification
 source.rs     GitHub source clone, pin, and path behavior
 crawl.rs      recursive bounded documentation crawl
 arxiv.rs      arXiv research-paper behavior
-markdown.rs   Markdown sectioning for controlled notes
-snapshot.rs   immutable docs, paper, and notes snapshots
+markdown.rs   Markdown plain-text extraction for indexing
+snapshot.rs   immutable docs and paper snapshots
 storage.rs    shared SQLite setup, resource metadata, and retrieval index
 retrieve.rs   lexical/vector retrieval, fusion, and context packing
 embeddings.rs swappable embedding backend
@@ -42,11 +42,13 @@ CLI -> AppContext -> manifest/cache/index services -> filesystem, Git, HTTP, SQL
 
 ## Source and query paths
 
+The three resource kinds are `source`, `docs`, and `research_paper`.
+
 Source repositories are pinned code trees, not retrieval chunks. Agents call `ctx path <label>` and inspect the checkout with normal code tools. This preserves repository structure and real callpaths.
 
-Documentation, research papers, and notes form the query corpus. `ctx query` searches only those resource kinds and returns cited evidence blocks. Labels and kinds narrow retrieval before ranking.
+Documentation and research papers form the query corpus. `ctx query` searches only those resource kinds and returns cited evidence blocks. Labels and kinds narrow retrieval before ranking.
 
-Docs, papers, and notes are immutable snapshots. `ctx update <label>` creates a new snapshot when content changes; queries never refresh resources implicitly. `ctx sync` can restore source checkouts from a manifest pin and reindex snapshots that still exist locally.
+Docs and papers are immutable snapshots. `ctx update <label>` creates a new snapshot when content changes; queries never refresh resources implicitly. `ctx sync` can restore source checkouts from a manifest pin and reindex snapshots that still exist locally.
 
 ## Grounding contract
 
@@ -58,7 +60,7 @@ The bundled `$ctx` skill and generated AGENTS.md block teach this workflow witho
 
 ## Retrieval
 
-Indexing stores parser-derived section metadata for controlled Markdown notes and paragraph chunks for crawled docs and papers. Lexical and optional vector candidates are fused with reciprocal rank fusion. `llms.txt` gets only a small transparent source prior after fusion.
+Indexing stores paragraph chunks for crawled docs and papers. Lexical and optional vector candidates are fused with reciprocal rank fusion. `llms.txt` gets only a small transparent source prior after fusion.
 
 Set `CTX_EMBEDDINGS=off` for tests or constrained environments. The default backend is local `fastembed`.
 

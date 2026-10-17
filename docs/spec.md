@@ -5,7 +5,7 @@
 ctx is a Rust CLI for grounding coding agents in authoritative references. It manages:
 
 - pinned source repositories inspected on disk;
-- snapshotted documentation, research papers, and notes retrieved as cited context;
+- snapshotted documentation and research papers retrieved as cited context;
 - an optional project manifest that records which global references matter and why;
 - a bundled `$ctx` skill and generated root AGENTS.md guidance.
 
@@ -24,14 +24,13 @@ Dependency grounding stays explicit: inspect the project's real manifest or lock
 
 ## Resources
 
-`ctx add` accepts absolute URLs:
+`ctx add` accepts absolute HTTP(S) URLs with three resource kinds:
 
 - GitHub repository URLs, optionally with `/tree/<ref>`, become `source` resources pinned to a commit.
 - arXiv URLs become `research_paper` resources with registry metadata and available full text.
 - Other HTTP(S) URLs become recursively crawled `docs` resources.
-- File URLs become snapshotted `notes` resources.
 
-Source repositories are cached code trees. Docs, papers, and notes are immutable snapshots with stable citations and content hashes. Notes preserve Markdown section metadata.
+Source repositories are cached code trees. Docs and papers are immutable snapshots with stable citations and content hashes.
 
 ## Project manifest and global cache
 
@@ -82,21 +81,21 @@ Add or remove a global resource from the current project manifest. `link --reaso
 
 ### `ctx update <target>`
 
-Refresh docs, paper, or notes content and create a new immutable snapshot when changed. A source resource reports its current pin; changing source pins stays explicit.
+Refresh docs or paper content and create a new immutable snapshot when changed. A source resource reports its current pin; changing source pins stays explicit.
 
 ### `ctx sync`
 
-Ensure linked resources exist locally. Recreate missing GitHub source checkouts from the manifest URL and pin. Verify existing snapshots, and reindex them with `--reindex`. Missing docs, paper, or notes snapshot content cannot be recreated exactly from the manifest alone.
+Ensure linked resources exist locally. Recreate missing GitHub source checkouts from the manifest URL and pin. Verify existing snapshots, and reindex them with `--reindex`. Missing docs or paper snapshot content cannot be recreated exactly from the manifest alone.
 
 ### `ctx query "<question>"`
 
-Search docs, papers, and notes. With a manifest, search linked queryable resources; otherwise search global resources.
+Search docs and papers. With a manifest, search linked queryable resources; otherwise search global resources.
 
 - `--label <name>` restricts to one agent-visible label.
-- `--kind docs|research-paper|notes` restricts the resource kind.
+- `--kind docs|research-paper` restricts the resource kind.
 - `--top-k`, `--budget`, and `--debug` control result packing and diagnostics.
 
-Default results include matched evidence with nearby section context and stable citations. Debug output adds lexical/vector ranks and source-prior details.
+Default results include matched evidence with nearby chunk context and stable citations. Debug output adds lexical/vector ranks and source-prior details.
 
 ### `ctx show [target]` and `ctx list`
 

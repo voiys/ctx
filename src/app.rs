@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::json;
-use url::Url;
 
 use crate::agents::upsert_agents_block;
 use crate::arxiv::{ArxivRegistry, ResearchPaperRegistry as _};
@@ -26,7 +25,7 @@ use crate::models::{
 };
 use crate::output::print_toon;
 use crate::retrieve::query_index;
-use crate::snapshot::{snapshot_docs, snapshot_notes};
+use crate::snapshot::snapshot_docs;
 use crate::source::{cache_github_source, cache_github_source_pointer, validate_source_pointer};
 use crate::storage::{
     allowed_global_resource_ids, current_content_hash, ensure_db, find_global_resource,
@@ -48,7 +47,7 @@ const AGENT_HELP: &str = "Efficient grounding workflow:
   1. Inspect the live project and its real manifest or lockfile; live source wins.
   2. Run `ctx show --cwd <repo>` to see the authoritative references already linked here.
   3. Use `ctx path <source-label> --cwd <repo>` plus normal code tools for pinned source.
-  4. Use `ctx query \"<specific question>\" --label <docs-label> --cwd <repo>` for fetched docs, research, or notes.
+  4. Use `ctx query \"<specific question>\" --label <docs-label> --cwd <repo>` for fetched docs or research.
   5. Add authoritative references with a descriptive label and reason, then link them to the project:
      ctx add <official-docs-or-version-pinned-github-url> --label <name> --reason \"<why authoritative>\" --cwd <repo>
      ctx link <name> --reason \"<why this project needs it>\" --cwd <repo>
@@ -67,7 +66,7 @@ Gotchas:
   Narrow query with --label and --kind when you know the target.
   Unscoped/global query is discovery; random lexical overlap can win.
   Agent evidence is matched chunks plus small local context, not a whole-doc summary.
-  Query searches linked docs, notes, and research; use ctx path plus rg for sources.
+  Query searches linked docs and research; use ctx path plus rg for sources.
   Default docs crawl is up to 2048 pages, not a completeness guarantee.
   Each fetched docs page is capped at 5 MiB; use --max-pages when needed.";
 
@@ -85,7 +84,7 @@ enum Commands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
-    /// Add a source, docs, or notes URL to the global cache.
+    /// Add a source, docs, or research paper URL to the global cache.
     Add {
         url: String,
         #[arg(long)]
@@ -120,7 +119,7 @@ enum Commands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
-    /// Query project docs, research papers, and notes.
+    /// Query project docs and research papers.
     Query {
         question: String,
         #[arg(long, default_value_t = DEFAULT_TOP_K)]
@@ -412,32 +411,6 @@ fn add(
             }
             (resource, json!({"snapshot": snapshot}))
         }
-        ResolvedInput::Notes { url, path } => {
-            let label = label.unwrap_or_else(|| {
-                path.file_stem()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("notes")
-                    .to_string()
-            });
-            let id = stable_id(&format!("notes:{url}:{label}"));
-            let snapshot = snapshot_notes(&paths.home, &id, &url, &path)?;
-            let resource = Resource {
-                id,
-                label,
-                kind: ResourceKind::Notes,
-                url,
-                reason,
-                current: snapshot.snapshot_id.clone(),
-                local_path: Some(snapshot.path.clone()),
-                created_at: now.clone(),
-                updated_at: now.clone(),
-            };
-            upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
-            if should_index {
-                index_snapshot(&paths.db_path, &resource, &snapshot)?;
-            }
-            (resource, json!({"snapshot": snapshot}))
-        }
         ResolvedInput::ResearchPaper {
             registry,
             id: arxiv_id,
@@ -547,37 +520,6 @@ fn update(
                 }),
             })?;
         }
-        ResourceKind::Notes => {
-            let file_path = Url::parse(&resource.url)
-                .ok()
-                .and_then(|url| url.to_file_path().ok())
-                .ok_or_else(|| anyhow!("notes URL is not a valid file URL"))?;
-            let snapshot = snapshot_notes(&paths.home, &resource.id, &resource.url, &file_path)?;
-            let changed = current_content_hash(&paths.db_path, &resource.id, &resource.current)?
-                .is_none_or(|hash| hash != snapshot.content_hash);
-            if changed || force {
-                resource.current = snapshot.snapshot_id.clone();
-                resource.local_path = Some(snapshot.path.clone());
-                resource.updated_at = timestamp();
-                if let (Some(manifest), Some(index)) = (&mut manifest, linked_index) {
-                    manifest.resources[index] = resource.clone();
-                    write_manifest(&paths.manifest_path, manifest)?;
-                }
-                upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
-                index_snapshot(&paths.db_path, &resource, &snapshot)?;
-            } else {
-                let _ = fs::remove_dir_all(&snapshot.path);
-            }
-            print_toon(CommandStatus {
-                command: "update",
-                status: "ok",
-                result: json!({
-                    "changed": changed,
-                    "resource": resource,
-                    "snapshot": snapshot,
-                }),
-            })?;
-        }
         ResourceKind::ResearchPaper => {
             let arxiv_id = resource
                 .url
@@ -651,7 +593,7 @@ fn sync(cwd: Option<PathBuf>, reindex: bool) -> Result<()> {
             Some(resource)
                 if matches!(
                     resource.kind,
-                    ResourceKind::Docs | ResourceKind::Notes | ResourceKind::ResearchPaper
+                    ResourceKind::Docs | ResourceKind::ResearchPaper
                 ) =>
             {
                 let path_ready = resource
@@ -695,7 +637,7 @@ fn sync(cwd: Option<PathBuf>, reindex: bool) -> Result<()> {
             }
             None if matches!(
                 manifest_resource.kind,
-                ResourceKind::Docs | ResourceKind::Notes | ResourceKind::ResearchPaper
+                ResourceKind::Docs | ResourceKind::ResearchPaper
             ) =>
             {
                 message = Some(
@@ -963,7 +905,7 @@ fn use_pointer(cwd: Option<PathBuf>, label: &str, pointer: &str) -> Result<()> {
     let index = find_manifest_resource_index(&manifest, label)?;
     match manifest.resources[index].kind {
         ResourceKind::Source => validate_source_pointer(&manifest.resources[index], pointer)?,
-        ResourceKind::Docs | ResourceKind::Notes | ResourceKind::ResearchPaper => {
+        ResourceKind::Docs | ResourceKind::ResearchPaper => {
             let snapshot_path =
                 snapshot_path_for_pointer(&paths.db_path, &manifest.resources[index].id, pointer)?
                     .ok_or_else(|| anyhow!("snapshot not found for {}: {pointer}", label))?;

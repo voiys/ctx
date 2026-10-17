@@ -4,7 +4,6 @@ use std::path::Path;
 use std::process::Command as StdCommand;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use assert_cmd::Command;
 use serde_json::{Value, json};
@@ -226,6 +225,8 @@ fn root_help_explains_the_efficient_grounding_workflow_before_usage() {
         assert!(stdout.contains("matched chunks plus small local context"));
         assert!(stdout.contains("Default docs crawl is up to 2048 pages"));
         assert!(stdout.contains("not mandatory ceremony"));
+        assert!(!stdout.contains("ledger"));
+        assert!(!stdout.contains("notes"));
         assert!(!stdout.contains("  memory"));
         assert!(!stdout.contains("  hook"));
         assert!(!stdout.contains("  recall"));
@@ -259,6 +260,7 @@ fn init_and_agents_write_idempotent_grounding_guidance() {
     assert!(agents.contains("manifest or lockfile"));
     assert!(agents.contains("ctx agents --cwd <repo>"));
     assert!(!agents.contains("ledger"));
+    assert!(!agents.contains("notes"));
     assert!(agents.contains("Keep this exact line."));
     assert!(!agents.contains("memory"));
     assert!(!agents.contains("hook"));
@@ -342,22 +344,20 @@ impl FixtureSite {
 }
 
 #[test]
-fn global_notes_can_be_used_without_project_manifest() {
+fn global_docs_can_be_used_without_project_manifest() {
     let project = TestProject::new();
-    let note_path = project.root.path().join("global-notes.md");
-    fs::write(
-        &note_path,
-        "Global docs shelf contains CTX_GLOBAL_ONLY_TOKEN for retrieval.",
-    )
-    .unwrap();
+    let site = FixtureSite::new(HashMap::from([(
+        "/global.md".to_string(),
+        "Global docs shelf contains CTX_GLOBAL_ONLY_TOKEN for retrieval.".to_string(),
+    )]));
 
     project
         .ctx()
         .arg("add")
-        .arg(format!("file://{}", note_path.display()))
+        .arg(format!("{}/global.md", site.base_url))
         .args(["--cwd"])
         .arg(project.root.path())
-        .args(["--label", "global-notes"])
+        .args(["--label", "global-docs"])
         .assert()
         .success();
     assert!(!project.root.path().join(".ctx/ctx.json").exists());
@@ -377,7 +377,7 @@ fn global_notes_can_be_used_without_project_manifest() {
 
     let show = project
         .ctx()
-        .args(["show", "global-notes", "--snapshots", "--cwd"])
+        .args(["show", "global-docs", "--snapshots", "--cwd"])
         .arg(project.root.path())
         .assert()
         .success()
@@ -385,12 +385,12 @@ fn global_notes_can_be_used_without_project_manifest() {
         .stdout
         .clone();
     let show = String::from_utf8(show).unwrap();
-    assert!(show.contains("global-notes"));
+    assert!(show.contains("global-docs"));
     assert!(show.contains("snapshot_id"));
 
     project
         .ctx()
-        .args(["remove", "global-notes", "--cwd"])
+        .args(["remove", "global-docs", "--cwd"])
         .arg(project.root.path())
         .assert()
         .success();
@@ -405,18 +405,16 @@ fn global_notes_can_be_used_without_project_manifest() {
         .stdout
         .clone();
     let list = String::from_utf8(list).unwrap();
-    assert!(!list.contains("global-notes"));
+    assert!(!list.contains("global-docs"));
 }
 
 #[test]
 fn project_link_adds_existing_global_resource_to_manifest() {
     let project = TestProject::new();
-    let note_path = project.root.path().join("project-notes.md");
-    fs::write(
-        &note_path,
-        "Project linked docs mention CTX_PROJECT_LINKED_TOKEN.",
-    )
-    .unwrap();
+    let site = FixtureSite::new(HashMap::from([(
+        "/project.md".to_string(),
+        "Project linked docs mention CTX_PROJECT_LINKED_TOKEN.".to_string(),
+    )]));
 
     project
         .ctx()
@@ -427,10 +425,10 @@ fn project_link_adds_existing_global_resource_to_manifest() {
     project
         .ctx()
         .arg("add")
-        .arg(format!("file://{}", note_path.display()))
+        .arg(format!("{}/project.md", site.base_url))
         .args(["--cwd"])
         .arg(project.root.path())
-        .args(["--label", "project-notes"])
+        .args(["--label", "project-docs"])
         .assert()
         .success();
     assert_eq!(project.manifest()["resources"].as_array().unwrap().len(), 0);
@@ -439,7 +437,7 @@ fn project_link_adds_existing_global_resource_to_manifest() {
         .ctx()
         .args([
             "link",
-            "project-notes",
+            "project-docs",
             "--reason",
             "needed for tests",
             "--cwd",
@@ -454,7 +452,7 @@ fn project_link_adds_existing_global_resource_to_manifest() {
     assert!(link.contains("command: link"));
 
     let manifest = project.manifest();
-    assert_eq!(manifest["resources"][0]["label"], "project-notes");
+    assert_eq!(manifest["resources"][0]["label"], "project-docs");
     assert_eq!(manifest["resources"][0]["reason"], "needed for tests");
     project.assert_manifest_has_no_local_paths();
 
@@ -473,7 +471,7 @@ fn project_link_adds_existing_global_resource_to_manifest() {
 
     project
         .ctx()
-        .args(["unlink", "project-notes", "--cwd"])
+        .args(["unlink", "project-docs", "--cwd"])
         .arg(project.root.path())
         .assert()
         .success();
@@ -493,69 +491,17 @@ fn project_link_adds_existing_global_resource_to_manifest() {
 }
 
 #[test]
-fn notes_can_be_added_queried_and_debugged() {
+fn query_can_find_docs_by_resource_label() {
     let project = TestProject::new();
-    let note_path = project.root.path().join("notes.md");
-    fs::write(
-        &note_path,
-        "# Retry Notes\n\n## Timeout Recovery\n\nRetries use exponential backoff and jitter. ERR_RETRY_TIMEOUT means the retry budget was exhausted.",
-    )
-    .unwrap();
-
-    project
-        .ctx()
-        .args(["init", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    project
-        .ctx()
-        .arg("add")
-        .arg(format!("file://{}", note_path.display()))
-        .args(["--cwd"])
-        .arg(project.root.path())
-        .args(["--label", "retry-notes"])
-        .assert()
-        .success();
-    project
-        .ctx()
-        .args(["link", "retry-notes", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-
-    let output = project
-        .ctx()
-        .args(["query", "retry timeout backoff", "--debug", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let stdout = String::from_utf8(output).unwrap();
-    assert!(stdout.contains("retry-notes"));
-    assert!(stdout.contains("ERR_RETRY_TIMEOUT"));
-    assert!(stdout.contains("debug:"));
-    assert!(stdout.contains("heading_path[2]:"));
-    assert!(stdout.contains("Timeout Recovery"));
-    assert!(stdout.contains("section_index:"));
-}
-
-#[test]
-fn query_can_find_notes_by_resource_label() {
-    let project = TestProject::new();
-    let note_path = project.root.path().join("notes.md");
-    fs::write(
-        &note_path,
-        "# Escalation Runbook\n\nCTX_LABEL_SEARCH_TOKEN is the body marker.",
-    )
-    .unwrap();
+    let site = FixtureSite::new(HashMap::from([(
+        "/runbook.md".to_string(),
+        "# Escalation Runbook\n\nCTX_LABEL_SEARCH_TOKEN is the body marker.".to_string(),
+    )]));
 
     project
         .ctx()
         .arg("add")
-        .arg(format!("file://{}", note_path.display()))
+        .arg(format!("{}/runbook.md", site.base_url))
         .args(["--label", "customer-oncall-playbook", "--cwd"])
         .arg(project.root.path())
         .assert()
@@ -578,71 +524,30 @@ fn query_can_find_notes_by_resource_label() {
 #[test]
 fn agent_query_groups_matches_with_surrounding_evidence() {
     let project = TestProject::new();
-    let note_path = project.root.path().join("agent-notes.md");
-    fs::write(
-        &note_path,
-        [
-            "# Review Client Job",
-            "",
-            "Use this workflow when a client submits a job.",
-            "",
-            "## Step 1: Open Intake",
-            "",
-            "Open the submitted job intake record.",
-            "",
-            "## Step 2: Review Details",
-            "",
-            "Check compensation gamma details against the client request.",
-            "",
-            "## Step 3: Filler A",
-            "",
-            "Ordinary filler content that should not be returned.",
-            "",
-            "## Step 4: Filler B",
-            "",
-            "Ordinary filler content that should not be returned.",
-            "",
-            "## Step 5: Filler C",
-            "",
-            "Ordinary filler content that should not be returned.",
-            "",
-            "## Step 6: Filler Middle",
-            "",
-            "This distant middle section should stay out of agent evidence.",
-            "",
-            "## Step 7: Filler D",
-            "",
-            "Ordinary filler content that should not be returned.",
-            "",
-            "## Step 8: Filler E",
-            "",
-            "Ordinary filler content that should not be returned.",
-            "",
-            "## Step 9: Filler F",
-            "",
-            "Ordinary filler content that should not be returned.",
-            "",
-            "## Step 10: Final Approval",
-            "",
-            "Record final approval delta before publishing.",
-            "",
-            "## Step 11: Notify Stakeholders",
-            "",
-            "Share the outcome with the client team.",
-            "",
-            "## Step 12: Close Intake",
-            "",
-            "Close the intake task.",
-        ]
-        .join("\n"),
-    )
-    .unwrap();
+    let body = [
+        "# Review Client Job\nUse this workflow when a client submits a job.",
+        "## Step 1: Open Intake\nOpen the submitted job intake record.",
+        "## Step 2: Review Details\nCheck compensation gamma details against the client request.",
+        "## Step 3: Filler A\nOrdinary filler content that should not be returned.",
+        "## Step 4: Filler B\nOrdinary filler content that should not be returned.",
+        "## Step 5: Filler C\nOrdinary filler content that should not be returned.",
+        "## Step 6: Filler Middle\nThis distant middle section should stay out of agent evidence.",
+        "## Step 7: Filler D\nOrdinary filler content that should not be returned.",
+        "## Step 8: Filler E\nOrdinary filler content that should not be returned.",
+        "## Step 9: Filler F\nOrdinary filler content that should not be returned.",
+        "## Step 10: Final Approval\nRecord final approval delta before publishing.",
+        "## Step 11: Notify Stakeholders\nShare the outcome with the client team.",
+        "## Step 12: Close Intake\nClose the intake task.",
+    ]
+    .map(|step| format!("{step} {}", "filler ".repeat(200)))
+    .join("\n\n");
+    let site = FixtureSite::new(HashMap::from([("/agent.md".to_string(), body)]));
 
     project
         .ctx()
         .arg("add")
-        .arg(format!("file://{}", note_path.display()))
-        .args(["--label", "review-job-notes", "--cwd"])
+        .arg(format!("{}/agent.md", site.base_url))
+        .args(["--label", "review-job-docs", "--cwd"])
         .arg(project.root.path())
         .assert()
         .success();
@@ -666,7 +571,7 @@ fn agent_query_groups_matches_with_surrounding_evidence() {
     assert!(stdout.contains("Step 2: Review Details"));
     assert!(stdout.contains("Step 10: Final Approval"));
     assert!(!stdout.contains("Step 6: Filler Middle"));
-    assert_eq!(stdout.matches("label: \"review-job-notes\"").count(), 1);
+    assert_eq!(stdout.matches("label: \"review-job-docs\"").count(), 1);
 }
 
 #[test]
@@ -940,8 +845,11 @@ fn update_keeps_pointer_on_noop_and_moves_on_content_change() {
 #[test]
 fn use_rejects_missing_snapshot() {
     let project = TestProject::new();
-    let note_path = project.root.path().join("notes.md");
-    fs::write(&note_path, "A note about cache pruning.").unwrap();
+    let site = FixtureSite::new(HashMap::from([(
+        "/cache.md".to_string(),
+        "Documentation about cache pruning.".to_string(),
+    )]));
+
     project
         .ctx()
         .args(["init", "--cwd"])
@@ -951,22 +859,22 @@ fn use_rejects_missing_snapshot() {
     project
         .ctx()
         .arg("add")
-        .arg(format!("file://{}", note_path.display()))
+        .arg(format!("{}/cache.md", site.base_url))
         .args(["--cwd"])
         .arg(project.root.path())
-        .args(["--label", "notes"])
+        .args(["--label", "docs"])
         .assert()
         .success();
     project
         .ctx()
-        .args(["link", "notes", "--cwd"])
+        .args(["link", "docs", "--cwd"])
         .arg(project.root.path())
         .assert()
         .success();
 
     project
         .ctx()
-        .args(["use", "notes", "missing-snapshot", "--cwd"])
+        .args(["use", "docs", "missing-snapshot", "--cwd"])
         .arg(project.root.path())
         .assert()
         .failure();
@@ -975,8 +883,11 @@ fn use_rejects_missing_snapshot() {
 #[test]
 fn legacy_manifest_local_path_is_stripped_on_next_write() {
     let project = TestProject::new();
-    let note_path = project.root.path().join("notes.md");
-    fs::write(&note_path, "A note about portable manifests.").unwrap();
+    let site = FixtureSite::new(HashMap::from([(
+        "/portable.md".to_string(),
+        "Documentation about portable manifests.".to_string(),
+    )]));
+
     project
         .ctx()
         .args(["init", "--cwd"])
@@ -986,15 +897,15 @@ fn legacy_manifest_local_path_is_stripped_on_next_write() {
     project
         .ctx()
         .arg("add")
-        .arg(format!("file://{}", note_path.display()))
+        .arg(format!("{}/portable.md", site.base_url))
         .args(["--cwd"])
         .arg(project.root.path())
-        .args(["--label", "notes"])
+        .args(["--label", "docs"])
         .assert()
         .success();
     project
         .ctx()
-        .args(["link", "notes", "--cwd"])
+        .args(["link", "docs", "--cwd"])
         .arg(project.root.path())
         .assert()
         .success();
@@ -1013,30 +924,36 @@ fn legacy_manifest_local_path_is_stripped_on_next_write() {
             .is_some()
     );
 
-    let current = project.resource_current("notes");
+    let current = project.resource_current("docs");
     project
         .ctx()
-        .args(["use", "notes", &current, "--cwd"])
+        .args(["use", "docs", &current, "--cwd"])
         .arg(project.root.path())
         .assert()
         .success();
-    assert_eq!(project.resource_current("notes"), current);
+    assert_eq!(project.resource_current("docs"), current);
     project.assert_manifest_has_no_local_paths();
 }
 
 #[test]
 fn manifest_spoofed_paths_do_not_drive_update_sync_or_path() {
     let project = TestProject::new();
-    let safe_note = project.root.path().join("safe.md");
-    fs::write(&safe_note, "Safe note carries CTX_SAFE_NOTE_ONLY.").unwrap();
+    let site = FixtureSite::new(HashMap::from([
+        (
+            "/safe.md".to_string(),
+            "Safe docs carry CTX_SAFE_DOCS_ONLY.".to_string(),
+        ),
+        (
+            "/secret.md".to_string(),
+            "Secret docs carry CTX_SECRET_DOCS_ONLY.".to_string(),
+        ),
+    ]));
     let outside = tempfile::tempdir().unwrap();
-    let secret_note = outside.path().join("secret.md");
-    fs::write(&secret_note, "Secret note carries CTX_SECRET_NOTE_ONLY.").unwrap();
     let evil_snapshot = outside.path().join("snapshot");
     fs::create_dir_all(&evil_snapshot).unwrap();
     fs::write(
         evil_snapshot.join("pages.json"),
-        r#"[{"url":"file:///evil","content":"Evil snapshot carries CTX_EVIL_SNAPSHOT_ONLY."}]"#,
+        r#"[{"url":"https://example.invalid/evil","content":"Evil snapshot carries CTX_EVIL_SNAPSHOT_ONLY."}]"#,
     )
     .unwrap();
 
@@ -1049,21 +966,21 @@ fn manifest_spoofed_paths_do_not_drive_update_sync_or_path() {
     project
         .ctx()
         .arg("add")
-        .arg(format!("file://{}", safe_note.display()))
+        .arg(format!("{}/safe.md", site.base_url))
         .args(["--cwd"])
         .arg(project.root.path())
-        .args(["--label", "notes"])
+        .args(["--label", "docs"])
         .assert()
         .success();
     project
         .ctx()
-        .args(["link", "notes", "--cwd"])
+        .args(["link", "docs", "--cwd"])
         .arg(project.root.path())
         .assert()
         .success();
 
     let mut manifest = project.manifest();
-    manifest["resources"][0]["url"] = json!(format!("file://{}", secret_note.display()));
+    manifest["resources"][0]["url"] = json!(format!("{}/secret.md", site.base_url));
     manifest["resources"][0]["local_path"] = json!(evil_snapshot.display().to_string());
     fs::write(
         project.root.path().join(".ctx/ctx.json"),
@@ -1095,14 +1012,14 @@ fn manifest_spoofed_paths_do_not_drive_update_sync_or_path() {
 
     project
         .ctx()
-        .args(["update", "notes", "--force", "--cwd"])
+        .args(["update", "docs", "--force", "--cwd"])
         .arg(project.root.path())
         .assert()
         .success();
 
     let secret_query = project
         .ctx()
-        .args(["query", "CTX_SECRET_NOTE_ONLY", "--cwd"])
+        .args(["query", "CTX_SECRET_DOCS_ONLY", "--cwd"])
         .arg(project.root.path())
         .assert()
         .success()
@@ -1112,7 +1029,7 @@ fn manifest_spoofed_paths_do_not_drive_update_sync_or_path() {
     assert!(
         !String::from_utf8(secret_query)
             .unwrap()
-            .contains("Secret note carries")
+            .contains("Secret docs carry")
     );
 
     manifest["resources"][0] = json!({
@@ -1143,8 +1060,11 @@ fn manifest_spoofed_paths_do_not_drive_update_sync_or_path() {
 #[test]
 fn unlink_removes_project_link_without_deleting_cache() {
     let project = TestProject::new();
-    let note_path = project.root.path().join("notes.md");
-    fs::write(&note_path, "A note about deleting cache entries.").unwrap();
+    let site = FixtureSite::new(HashMap::from([(
+        "/cache.md".to_string(),
+        "Documentation about deleting cache entries.".to_string(),
+    )]));
+
     project
         .ctx()
         .args(["init", "--cwd"])
@@ -1154,24 +1074,24 @@ fn unlink_removes_project_link_without_deleting_cache() {
     project
         .ctx()
         .arg("add")
-        .arg(format!("file://{}", note_path.display()))
+        .arg(format!("{}/cache.md", site.base_url))
         .args(["--cwd"])
         .arg(project.root.path())
-        .args(["--label", "notes"])
+        .args(["--label", "docs"])
         .assert()
         .success();
     project
         .ctx()
-        .args(["link", "notes", "--cwd"])
+        .args(["link", "docs", "--cwd"])
         .arg(project.root.path())
         .assert()
         .success();
-    let cache_path = project.resource_path("notes");
+    let cache_path = project.resource_path("docs");
     assert!(std::path::Path::new(&cache_path).exists());
 
     project
         .ctx()
-        .args(["unlink", "notes", "--cwd"])
+        .args(["unlink", "docs", "--cwd"])
         .arg(project.root.path())
         .assert()
         .success();
@@ -1185,7 +1105,7 @@ fn unlink_removes_project_link_without_deleting_cache() {
 
     project
         .ctx()
-        .args(["remove", "notes", "--prune-cache", "--cwd"])
+        .args(["remove", "docs", "--prune-cache", "--cwd"])
         .arg(project.root.path())
         .assert()
         .success();
@@ -1369,12 +1289,10 @@ fn sync_rehydrates_missing_source_checkout_from_manifest() {
 #[ignore = "downloads a local embedding model; run for full retrieval smoke coverage"]
 fn embeddings_enable_vector_results_when_lexical_search_misses() {
     let project = TestProject::new();
-    let note_path = project.root.path().join("notes.md");
-    fs::write(
-        &note_path,
-        "The compiler enforces borrowing and lifetimes so references stay valid.",
-    )
-    .unwrap();
+    let site = FixtureSite::new(HashMap::from([(
+        "/rust.md".to_string(),
+        "The compiler enforces borrowing and lifetimes so references stay valid.".to_string(),
+    )]));
 
     project
         .ctx_with_embeddings()
@@ -1385,15 +1303,15 @@ fn embeddings_enable_vector_results_when_lexical_search_misses() {
     project
         .ctx_with_embeddings()
         .arg("add")
-        .arg(format!("file://{}", note_path.display()))
+        .arg(format!("{}/rust.md", site.base_url))
         .args(["--cwd"])
         .arg(project.root.path())
-        .args(["--label", "rust-notes"])
+        .args(["--label", "rust-docs"])
         .assert()
         .success();
     project
         .ctx_with_embeddings()
-        .args(["link", "rust-notes", "--cwd"])
+        .args(["link", "rust-docs", "--cwd"])
         .arg(project.root.path())
         .assert()
         .success();

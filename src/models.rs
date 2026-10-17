@@ -11,14 +11,12 @@ use crate::constants::{DEFAULT_BUDGET_TOKENS, DEFAULT_TOP_K};
 pub(crate) enum ResourceKind {
     Source,
     Docs,
-    Notes,
     ResearchPaper,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum QueryKind {
     Docs,
-    Notes,
     ResearchPaper,
 }
 
@@ -26,7 +24,6 @@ impl From<QueryKind> for ResourceKind {
     fn from(value: QueryKind) -> Self {
         match value {
             QueryKind::Docs => ResourceKind::Docs,
-            QueryKind::Notes => ResourceKind::Notes,
             QueryKind::ResearchPaper => ResourceKind::ResearchPaper,
         }
     }
@@ -94,10 +91,6 @@ pub(crate) enum ResolvedInput {
     },
     Docs {
         url: String,
-    },
-    Notes {
-        url: String,
-        path: PathBuf,
     },
     ResearchPaper {
         registry: ResearchPaperRegistry,

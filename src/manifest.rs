@@ -122,7 +122,7 @@ mod tests {
             resources: vec![
                 test_resource("source-id", "source", ResourceKind::Source),
                 test_resource("docs-id", "docs", ResourceKind::Docs),
-                test_resource("notes-id", "notes", ResourceKind::Notes),
+                test_resource("extra-docs-id", "extra-docs", ResourceKind::Docs),
                 test_resource(
                     "research-paper-id",
                     "research-paper",
@@ -137,7 +137,7 @@ mod tests {
             BTreeSet::from([
                 "research-paper-id".into(),
                 "docs-id".into(),
-                "notes-id".into()
+                "extra-docs-id".into()
             ])
         );
 
@@ -145,7 +145,10 @@ mod tests {
         assert!(source_label.is_err());
 
         let docs = allowed_resource_ids(&manifest, None, Some(ResourceKind::Docs)).unwrap();
-        assert_eq!(docs, BTreeSet::from(["docs-id".into()]));
+        assert_eq!(
+            docs,
+            BTreeSet::from(["docs-id".into(), "extra-docs-id".into()])
+        );
 
         let papers =
             allowed_resource_ids(&manifest, None, Some(ResourceKind::ResearchPaper)).unwrap();

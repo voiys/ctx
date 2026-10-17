@@ -41,15 +41,6 @@ pub(crate) fn resolve_input(input: &str) -> Result<ResolvedInput> {
                 })
             }
         }
-        "file" => {
-            let path = url
-                .to_file_path()
-                .map_err(|_| anyhow!("file URL must point to an absolute local path"))?;
-            Ok(ResolvedInput::Notes {
-                url: url.to_string(),
-                path,
-            })
-        }
         scheme => bail!("unsupported URL scheme: {scheme}"),
     }
 }
@@ -104,6 +95,7 @@ mod tests {
     #[test]
     fn rejects_bare_paths() {
         assert!(resolve_input("/tmp/notes.md").is_err());
+        assert!(resolve_input("file:///abs/x.md").is_err());
     }
 
     #[test]

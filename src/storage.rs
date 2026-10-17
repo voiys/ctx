@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
 
 use crate::embeddings::{EmbeddingBackend, EmbeddingService};
-use crate::markdown::{MarkdownSection, plain_text, section_markdown};
+use crate::markdown::plain_text;
 use crate::models::{Resource, ResourceKind, SnapshotMetadata, SnapshotPage};
 use crate::util::{content_hash, kind_str, path_size_bytes};
 
@@ -134,7 +134,7 @@ fn index_pages(
         .par_iter()
         .enumerate()
         .flat_map(|(page_index, page)| {
-            page_chunks(resource.kind, page)
+            page_chunks(page)
                 .into_iter()
                 .map(move |chunk| (page_index, page.url.clone(), chunk))
                 .collect::<Vec<_>>()
@@ -234,13 +234,7 @@ struct IndexedChunk {
     content_hash: String,
 }
 
-fn page_chunks(kind: ResourceKind, page: &SnapshotPage) -> Vec<IndexedChunk> {
-    if kind == ResourceKind::Notes {
-        return section_markdown(&page.content)
-            .into_iter()
-            .map(IndexedChunk::from)
-            .collect();
-    }
+fn page_chunks(page: &SnapshotPage) -> Vec<IndexedChunk> {
     chunk_text(&page.content, 2_400)
         .into_iter()
         .enumerate()
@@ -261,26 +255,6 @@ fn page_chunks(kind: ResourceKind, page: &SnapshotPage) -> Vec<IndexedChunk> {
             }
         })
         .collect::<Vec<_>>()
-}
-
-impl From<MarkdownSection> for IndexedChunk {
-    fn from(section: MarkdownSection) -> Self {
-        let heading_path =
-            serde_json::to_string(&section.heading_path).unwrap_or_else(|_| "[]".to_string());
-        Self {
-            chunk_index: section.section_index,
-            section_index: section.section_index as i64,
-            heading_path,
-            heading_level: section.heading_level as i64,
-            parent_section_index: section.parent_section_index.map(|value| value as i64),
-            previous_section_index: section.previous_section_index.map(|value| value as i64),
-            next_section_index: section.next_section_index.map(|value| value as i64),
-            anchor: section.anchor,
-            content: section.markdown,
-            plain_text: section.plain_text,
-            content_hash: section.content_hash,
-        }
-    }
 }
 
 pub(crate) fn upsert_global_resource(
@@ -603,7 +577,6 @@ fn parse_kind(value: &str) -> Option<ResourceKind> {
     match value {
         "source" => Some(ResourceKind::Source),
         "docs" => Some(ResourceKind::Docs),
-        "notes" => Some(ResourceKind::Notes),
         "research_paper" | "arxiv" => Some(ResourceKind::ResearchPaper),
         _ => None,
     }
