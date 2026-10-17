@@ -53,12 +53,17 @@ fn lexical_candidates(
          FROM chunks_fts
          JOIN chunks c ON c.id = chunks_fts.rowid
          WHERE chunks_fts MATCH ?1
+           AND EXISTS (SELECT 1 FROM json_each(?3) a
+                       WHERE json_extract(a.value, '$[0]') = c.resource_id
+                         AND json_extract(a.value, '$[1]') = c.snapshot_id)
          ORDER BY bm25(chunks_fts)
          LIMIT ?2",
     )?;
-    let rows = stmt.query_map(params![fts_query, limit as i64], |row| {
-        Ok((candidate_base_from_row(row)?, row.get::<_, f64>(17)?))
-    })?;
+    let allowed_pairs_json = serde_json::to_string(allowed_resource_ids)?;
+    let rows = stmt.query_map(
+        params![fts_query, limit as i64, allowed_pairs_json],
+        |row| Ok((candidate_base_from_row(row)?, row.get::<_, f64>(17)?)),
+    )?;
     let mut out = Vec::new();
     for row in rows {
         let (base, score) = row?;
@@ -81,10 +86,14 @@ fn vector_candidates(
                 section_index, heading_path, heading_level, parent_section_index,
                 previous_section_index, next_section_index, anchor, plain_text,
                 content_hash, content, embedding
-         FROM chunks
-         WHERE embedding IS NOT NULL AND LENGTH(embedding) > 0",
+         FROM chunks c
+         WHERE embedding IS NOT NULL AND LENGTH(embedding) > 0
+           AND EXISTS (SELECT 1 FROM json_each(?1) a
+                       WHERE json_extract(a.value, '$[0]') = c.resource_id
+                         AND json_extract(a.value, '$[1]') = c.snapshot_id)",
     )?;
-    let rows = stmt.query_map([], |row| {
+    let allowed_pairs_json = serde_json::to_string(allowed_resource_ids)?;
+    let rows = stmt.query_map(params![allowed_pairs_json], |row| {
         Ok((candidate_base_from_row(row)?, row.get::<_, Vec<u8>>(17)?))
     })?;
     let mut chunks = Vec::new();

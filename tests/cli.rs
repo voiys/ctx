@@ -460,6 +460,79 @@ fn query_can_find_docs_by_resource_label() {
 }
 
 #[test]
+fn query_latest_snapshot_survives_many_updates() {
+    let project = TestProject::new();
+    let paragraph = format!("crowdingtoken {}", "ordinary filler ".repeat(85));
+    let body = |revision| {
+        let padding = if revision == 10 {
+            " extra".repeat(20)
+        } else {
+            String::new()
+        };
+        format!(
+            "{}\n\nRevision {revision}.",
+            (0..51)
+                .map(|_| format!("{paragraph}{padding}"))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        )
+    };
+    let site = FixtureSite::new(HashMap::from([("/crowding.md".to_string(), body(0))]));
+    project
+        .ctx()
+        .arg("add")
+        .arg(format!("{}/crowding.md", site.base_url))
+        .args(["--label", "crowding"])
+        .assert()
+        .success();
+    for revision in 1..=10 {
+        site.set("/crowding.md", &body(revision));
+        project
+            .ctx()
+            .args(["update", "crowding"])
+            .assert()
+            .success();
+    }
+    let latest_path = project.resource_path("crowding");
+    let latest = Path::new(&latest_path)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let conn = rusqlite::Connection::open(project.home.path().join("ctx.db")).unwrap();
+    let historical: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM chunks WHERE snapshot_id != ?1 AND plain_text LIKE '%crowdingtoken%'",
+        rusqlite::params![latest], |row| row.get(0),
+    ).unwrap();
+    assert!(
+        historical > 500,
+        "only {historical} historical matching chunks"
+    );
+    let output = project
+        .ctx()
+        .args([
+            "query",
+            "crowdingtoken",
+            "--label",
+            "crowding",
+            "--top-k",
+            "1",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.contains("kind: match"), "{stdout}");
+    assert!(stdout.contains("evidence["), "{stdout}");
+    assert!(
+        stdout.contains(&format!("snapshot_id: \"{latest}\"")),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn agent_query_groups_matches_with_surrounding_evidence() {
     let project = TestProject::new();
     let body = [
