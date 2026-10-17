@@ -13,7 +13,6 @@ The live repository remains the primary source of truth. ctx supplies external a
 - Linking a curated set of global references to a project through `.ctx/ctx.json`.
 - Restoring missing pinned source checkouts and reindexing snapshots with `ctx sync`.
 - Installing a `$ctx` skill and generating focused root `AGENTS.md` guidance.
-- Keeping one shared Markdown note for work that spans threads, repositories, or worktrees.
 
 ctx is not an agent memory system, hook framework, background service, or package manager. For dependency questions, inspect the project's real manifest or lockfile, resolve the exact installed version, then add or link that version's official docs or version-pinned source.
 
@@ -65,7 +64,7 @@ Source repositories are cached globally and explored with normal code tools such
 
 ## Bundled `$ctx` skill
 
-`ctx install` copies the binary and installs the bundled skill at `$CODEX_HOME/skills/ctx` or `~/.codex/skills/ctx`. Invoke it as `$ctx` when repository work depends on pinned upstream source, exact dependency versions, external documentation, research. It intentionally does not trigger for every task.
+`ctx install` copies the binary and installs the bundled skill at `$CODEX_HOME/skills/ctx` or `~/.codex/skills/ctx`. Invoke it as `$ctx` when repository work depends on pinned upstream source, exact dependency versions, external documentation, research. It intentionally does not trigger for every task. Resolve the exact installed version, pin it, then use `ctx path` and `rg` on upstream source, tests, and examples before querying docs. The skill covers idiomatic usage, copying patterns, tests as specification, API tracing, error diagnosis, upgrade impact, and optional upstream history.
 
 ## Build and install locally
 

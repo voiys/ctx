@@ -54,7 +54,7 @@ Docs and papers are immutable snapshots. `ctx update <label>` creates a new snap
 
 ctx is supporting evidence. The live project and runtime behavior win when evidence conflicts.
 
-For dependency-sensitive work, the agent reads the project's real manifest or lockfile, resolves the exact installed version, then links that version's official docs or pinned source. ctx deliberately does not implement a broad package-manager resolver.
+For dependency-sensitive work, the agent reads the project's real manifest or lockfile, resolves the exact installed version, pins upstream source, then uses `ctx path` and `rg` to read source, tests, and examples. Documentation queries are a fallback. ctx deliberately does not implement a broad package-manager resolver.
 
 The bundled `$ctx` skill and generated AGENTS.md block teach this workflow without requiring ctx on every task. `ctx agents` refreshes the generated block idempotently.
 

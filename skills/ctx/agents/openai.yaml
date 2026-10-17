@@ -1,4 +1,4 @@
 interface:
   display_name: "ctx authoritative grounding"
   short_description: "Ground repo work in pinned upstream source and tests"
-  default_prompt: "Use $ctx to ground this task in the live repository and the smallest relevant set of authoritative references."
+  default_prompt: "Use $ctx to resolve the exact dependency version, read pinned upstream source and tests, and verify findings against the live repository."

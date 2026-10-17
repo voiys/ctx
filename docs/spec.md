@@ -20,7 +20,7 @@ Commands emit compact structured stdout. Progress and diagnostics use stderr.
 - Automatic resource refresh during query.
 - Bare filesystem paths for `ctx add`.
 
-Dependency grounding stays explicit: inspect the project's real manifest or lockfile, resolve the exact version, then add or link official docs or source pinned to that version.
+Dependency grounding stays explicit: inspect the project's real manifest or lockfile, resolve the exact version, pin its upstream source, then use `ctx path` and `rg` on source, tests, and examples first. Query official documentation or research when source is unavailable or insufficient.
 
 ## Resources
 
