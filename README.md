@@ -14,7 +14,7 @@ The live repository remains the primary source of truth. ctx supplies external a
 - Restoring missing pinned source checkouts and reindexing snapshots with `ctx sync`.
 - Installing a `$ctx` skill and generating focused root `AGENTS.md` guidance.
 
-ctx is not an agent memory system, hook framework, background service, or package manager. For dependency questions, inspect the project's real manifest or lockfile, resolve the exact installed version, then add or link that version's official docs or version-pinned source.
+ctx is not an agent memory system, hook framework, background service, or package manager. For dependency questions, inspect the project's real manifest or lockfile, resolve the exact installed version, then pin → ctx path → rg source/tests first; use official documentation as fallback. Do not guess versions.
 
 ## Efficient workflow
 
@@ -64,7 +64,7 @@ Source repositories are cached globally and explored with normal code tools such
 
 ## Bundled `$ctx` skill
 
-`ctx install` copies the binary and installs the bundled skill at `$CODEX_HOME/skills/ctx` or `~/.codex/skills/ctx`. Invoke it as `$ctx` when repository work depends on pinned upstream source, exact dependency versions, external documentation, research. It intentionally does not trigger for every task. Resolve the exact installed version, pin it, then use `ctx path` and `rg` on upstream source, tests, and examples before querying docs. The skill covers idiomatic usage, copying patterns, tests as specification, API tracing, error diagnosis, upgrade impact, and optional upstream history.
+`ctx install` copies the binary and installs the bundled skill at `$CODEX_HOME/skills/ctx` or `~/.codex/skills/ctx`. Invoke it as `$ctx` when repository work depends on pinned upstream source, exact dependency versions, external documentation, or research papers. It intentionally does not trigger for every task. Resolve the exact installed version, pin it, then use `ctx path` and `rg` on upstream source, tests, and examples before querying docs. The skill covers idiomatic usage, copying patterns, tests as specification, API tracing, error diagnosis, upgrade impact, and optional upstream history.
 
 ## Build and install locally
 

@@ -39,7 +39,6 @@ The layering is:
 CLI -> AppContext -> manifest/cache/index services -> filesystem, Git, HTTP, SQLite
 ```
 
-
 ## Source and query paths
 
 The three resource kinds are `source`, `docs`, and `research_paper`.
