@@ -9,7 +9,17 @@ use crate::models::{Manifest, Resource, ResourceKind};
 pub(crate) fn read_manifest(path: &Path) -> Result<Manifest> {
     let raw = fs::read_to_string(path)
         .map_err(|error| anyhow!("failed to read manifest at {}: {error}", path.display()))?;
-    Ok(serde_json::from_str(&raw)?)
+    let mut value: serde_json::Value = serde_json::from_str(&raw)?;
+    if let Some(resources) = value
+        .get_mut("resources")
+        .and_then(|value| value.as_array_mut())
+    {
+        resources.retain(|resource| {
+            resource.get("kind").and_then(|kind| kind.as_str())
+                != Some(crate::storage::LEGACY_NOTES_KIND)
+        });
+    }
+    Ok(serde_json::from_value(value)?)
 }
 
 pub(crate) fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {

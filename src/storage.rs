@@ -13,6 +13,8 @@ use crate::markdown::plain_text;
 use crate::models::{Resource, ResourceKind, SnapshotMetadata, SnapshotPage};
 use crate::util::{content_hash, kind_str, path_size_bytes};
 
+pub(crate) const LEGACY_NOTES_KIND: &str = "notes";
+
 pub(crate) fn ensure_db(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -60,6 +62,35 @@ pub(crate) fn ensure_db(path: &Path) -> Result<()> {
         ",
     )?;
     ensure_chunk_columns(&conn)?;
+    if conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM resources WHERE kind = ?1)",
+        params![LEGACY_NOTES_KIND],
+        |row| row.get::<_, bool>(0),
+    )? {
+        conn.execute(
+            "DELETE FROM chunks_fts WHERE resource_id IN (SELECT id FROM resources WHERE kind = ?1)",
+            params![LEGACY_NOTES_KIND],
+        )?;
+        conn.execute(
+            "DELETE FROM chunks WHERE resource_id IN (SELECT id FROM resources WHERE kind = ?1)",
+            params![LEGACY_NOTES_KIND],
+        )?;
+        conn.execute(
+            "DELETE FROM snapshots WHERE resource_id IN (SELECT id FROM resources WHERE kind = ?1)",
+            params![LEGACY_NOTES_KIND],
+        )?;
+        conn.execute(
+            "DELETE FROM resources WHERE kind = ?1",
+            params![LEGACY_NOTES_KIND],
+        )?;
+    }
+    if let Some(home) = path.parent() {
+        let dir = home.join(LEGACY_NOTES_KIND);
+        if dir.exists() {
+            fs::remove_dir_all(dir)?;
+        }
+    }
+    conn.execute_batch("DROP TABLE IF EXISTS ledgers")?;
     Ok(())
 }
 

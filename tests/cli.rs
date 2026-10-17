@@ -344,6 +344,124 @@ impl FixtureSite {
 }
 
 #[test]
+fn legacy_notes_data_is_wiped_on_open() {
+    const LEGACY_NOTES_KIND: &str = "notes";
+
+    let project = TestProject::new();
+    let site = FixtureSite::new(HashMap::from([(
+        "/current.md".to_string(),
+        "Current documentation contains migration_token.".to_string(),
+    )]));
+    project
+        .ctx()
+        .args(["init", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    project
+        .ctx()
+        .arg("add")
+        .arg(format!("{}/current.md", site.base_url))
+        .args(["--label", "current-docs", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+
+    let id = "legacy-id";
+    let dir = project.home.path().join(LEGACY_NOTES_KIND);
+    fs::create_dir_all(dir.join(id)).unwrap();
+    fs::write(dir.join(id).join("content.md"), "migration_token").unwrap();
+    let conn = rusqlite::Connection::open(project.home.path().join("ctx.db")).unwrap();
+    conn.execute(
+        "INSERT INTO resources (id, label, kind, url, current, local_path, updated_at)
+         VALUES (?1, ?1, ?2, 'https://example.com/legacy', 'snapshot', ?3, '2026-01-01')",
+        rusqlite::params![id, LEGACY_NOTES_KIND, dir.join(id).to_str().unwrap()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO snapshots (resource_id, snapshot_id, kind, source_url, content_hash, fetched_at, page_count, path)
+         VALUES (?1, 'snapshot', ?2, 'https://example.com/legacy', 'hash', '2026-01-01', 1, ?3)",
+        rusqlite::params![id, LEGACY_NOTES_KIND, dir.join(id).to_str().unwrap()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO chunks (resource_id, snapshot_id, kind, label, source_url, chunk_index, content)
+         VALUES (?1, 'snapshot', ?2, ?1, 'https://example.com/legacy', 0, 'migration_token')",
+        rusqlite::params![id, LEGACY_NOTES_KIND],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO chunks_fts (content, resource_id, snapshot_id, label)
+         VALUES ('migration_token', ?1, 'snapshot', ?1)",
+        rusqlite::params![id],
+    )
+    .unwrap();
+    let mut manifest = project.manifest();
+    manifest["resources"].as_array_mut().unwrap().push(json!({
+        "id": id,
+        "label": id,
+        "kind": LEGACY_NOTES_KIND,
+        "url": "https://example.com/legacy",
+        "current": "snapshot",
+        "created_at": "2026-01-01",
+        "updated_at": "2026-01-01"
+    }));
+    fs::write(
+        project.root.path().join(".ctx/ctx.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    for args in [
+        vec!["list"],
+        vec!["show"],
+        vec!["query", "migration_token"],
+        vec!["sync"],
+    ] {
+        project
+            .ctx()
+            .args(args)
+            .arg("--cwd")
+            .arg(project.root.path())
+            .assert()
+            .success();
+    }
+    for table in ["resources", "snapshots", "chunks"] {
+        let count: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE kind = ?1"),
+                rusqlite::params![LEGACY_NOTES_KIND],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "{table}");
+    }
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM chunks_fts WHERE resource_id = ?1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(!dir.exists());
+
+    project
+        .ctx()
+        .args(["link", "current-docs", "--cwd"])
+        .arg(project.root.path())
+        .assert()
+        .success();
+    assert!(
+        project.manifest()["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|resource| resource["kind"] != LEGACY_NOTES_KIND)
+    );
+}
+
+#[test]
 fn global_docs_can_be_used_without_project_manifest() {
     let project = TestProject::new();
     let site = FixtureSite::new(HashMap::from([(
