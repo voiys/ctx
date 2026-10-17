@@ -460,6 +460,46 @@ fn query_can_find_docs_by_resource_label() {
 }
 
 #[test]
+fn duplicate_labels_use_first_inserted_resource() {
+    let project = TestProject::new();
+    let site = FixtureSite::new(HashMap::from([(
+        "/first.md".to_string(),
+        "First docs.".to_string(),
+    )]));
+    let url = format!("{}/first.md", site.base_url);
+    project
+        .ctx()
+        .args(["add", &url, "--label", "duplicate"])
+        .assert()
+        .success();
+    let conn = rusqlite::Connection::open(project.home.path().join("ctx.db")).unwrap();
+    conn.execute(
+        "INSERT INTO resources (id, label, kind, url, current, local_path, updated_at)
+         VALUES ('second', 'duplicate', 'source', 'https://example.com/second', 'commit', ?1, '2026-01-01')",
+        rusqlite::params![project.home.path().to_str().unwrap()],
+    ).unwrap();
+    let output = project
+        .ctx()
+        .args(["add", &url, "--label", "duplicate"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("existing: true")
+    );
+    project
+        .ctx()
+        .args(["path", "duplicate"])
+        .assert()
+        .failure()
+        .stderr("error: ctx path only supports source resources\n");
+}
+
+#[test]
 fn query_latest_snapshot_survives_many_updates() {
     let project = TestProject::new();
     let paragraph = format!("crowdingtoken {}", "ordinary filler ".repeat(85));
@@ -571,7 +611,7 @@ fn agent_query_groups_matches_with_surrounding_evidence() {
         .stdout
         .clone();
     let stdout = String::from_utf8(output).unwrap();
-    assert!(stdout.contains("mode: agent"));
+    assert!(!stdout.contains("mode:"));
     assert!(stdout.contains("evidence["));
     assert!(stdout.contains("kind: match"));
     assert!(stdout.contains("kind: \"context-between\""));

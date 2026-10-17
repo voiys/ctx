@@ -27,7 +27,7 @@ impl From<QueryKind> for ResourceKind {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct Resource {
     pub(crate) id: String,
     pub(crate) label: String,

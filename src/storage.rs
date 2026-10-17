@@ -350,7 +350,8 @@ pub(crate) fn find_global_resource(db_path: &Path, target: &str) -> Result<Resou
         .query_row(
             "SELECT id, label, kind, url, current, local_path, updated_at, reason
              FROM resources
-             WHERE label = ?1 OR url = ?1 OR id = ?1",
+             WHERE label = ?1 OR url = ?1 OR id = ?1
+             ORDER BY rowid ASC LIMIT 1",
             params![target],
             resource_from_row,
         )
@@ -463,7 +464,7 @@ pub(crate) fn list_global_resource_models(
     let mut stmt = conn.prepare(
         "SELECT id, label, kind, url, current, local_path, updated_at, reason
          FROM resources
-         ORDER BY kind ASC, label ASC",
+         ORDER BY rowid ASC",
     )?;
     let rows = stmt.query_map([], resource_from_row)?;
     let mut out = Vec::new();

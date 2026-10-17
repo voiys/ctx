@@ -444,7 +444,7 @@ fn query(command: QueryCommand) -> Result<()> {
         status: "ok",
         result: json!({
             "question": command.question, "top_k": command.top_k, "budget_tokens": command.budget_tokens,
-            "debug": command.debug, "mode": "agent", "results": results,
+            "debug": command.debug, "results": results,
         }),
     })
 }
