@@ -20,7 +20,7 @@ const AGENT_SEMANTIC_ANCHOR_LIMIT: usize = 3;
 pub(crate) fn query_index(
     db_path: &Path,
     question: &str,
-    allowed_resource_ids: &BTreeSet<String>,
+    allowed_resource_ids: &BTreeSet<(String, String)>,
     top_k: usize,
     budget_tokens: usize,
     debug: bool,
@@ -37,7 +37,7 @@ pub(crate) fn query_index(
 fn lexical_candidates(
     db_path: &Path,
     question: &str,
-    allowed_resource_ids: &BTreeSet<String>,
+    allowed_resource_ids: &BTreeSet<(String, String)>,
     limit: usize,
 ) -> Result<Vec<(CandidateBase, f64)>> {
     let fts_query = fts_query(question);
@@ -62,7 +62,7 @@ fn lexical_candidates(
     let mut out = Vec::new();
     for row in rows {
         let (base, score) = row?;
-        if allowed_resource_ids.contains(&base.resource_id) {
+        if allowed_resource_ids.contains(&(base.resource_id.clone(), base.snapshot_id.clone())) {
             out.push((base, score));
         }
     }
@@ -72,7 +72,7 @@ fn lexical_candidates(
 fn vector_candidates(
     db_path: &Path,
     question: &str,
-    allowed_resource_ids: &BTreeSet<String>,
+    allowed_resource_ids: &BTreeSet<(String, String)>,
     limit: usize,
 ) -> Result<Vec<(CandidateBase, f64)>> {
     let conn = open_db(db_path)?;
@@ -90,7 +90,7 @@ fn vector_candidates(
     let mut chunks = Vec::new();
     for row in rows {
         let (base, embedding) = row?;
-        if allowed_resource_ids.contains(&base.resource_id) {
+        if allowed_resource_ids.contains(&(base.resource_id.clone(), base.snapshot_id.clone())) {
             chunks.push((base, embedding));
         }
     }

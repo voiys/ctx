@@ -1,13 +1,10 @@
-use std::collections::BTreeSet;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
-use clap::{CommandFactory, Parser, Subcommand};
+use anyhow::{Result, bail};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 use serde_json::json;
 
-use crate::agents::upsert_agents_block;
 use crate::arxiv::{ArxivRegistry, ResearchPaperRegistry as _};
 use crate::constants::{
     DEFAULT_BUDGET_TOKENS, DEFAULT_CRAWL_CONCURRENCY, DEFAULT_MAX_PAGES, DEFAULT_TOP_K,
@@ -15,111 +12,68 @@ use crate::constants::{
 use crate::context::AppContext;
 use crate::input::resolve_input;
 use crate::install::{default_install_status, install};
-use crate::manifest::{
-    allowed_resource_ids, find_manifest_resource, find_manifest_resource_index, read_manifest,
-    upsert_manifest_resource, write_manifest,
-};
 use crate::models::{
-    CommandStatus, Defaults, Manifest, QueryKind, ResearchPaperRegistry, ResolvedInput, Resource,
-    ResourceKind, SnapshotMetadata,
+    CommandStatus, QueryKind, ResearchPaperRegistry, ResolvedInput, Resource, ResourceKind,
 };
 use crate::output::print_toon;
 use crate::retrieve::query_index;
 use crate::snapshot::snapshot_docs;
-use crate::source::{cache_github_source, cache_github_source_pointer, validate_source_pointer};
+use crate::source::{cache_github_source, cache_github_source_pointer};
 use crate::storage::{
-    allowed_global_resource_ids, current_content_hash, ensure_db, find_global_resource,
-    index_snapshot, list_global_resource_models, list_global_resources, remove_global_resource,
-    snapshot_path_for_pointer, snapshots_for_resources, upsert_global_resource,
+    allowed_global_resource_ids, current_content_hash, find_global_resource, index_snapshot,
+    list_global_resource_models, list_global_resources, remove_global_resource,
+    snapshots_for_resources, upsert_global_resource,
 };
 use crate::util::{default_label_for_url, stable_id, timestamp};
 
 #[derive(Parser)]
-#[command(name = "ctx")]
-#[command(about = "Project context for coding agents")]
-#[command(version)]
+#[command(name = "ctx", version)]
+#[command(
+    about = "Pin upstream source and read it with rg before falling back to searchable docs and papers."
+)]
+#[command(
+    before_help = "Offline reference workflow:\n  1. ctx add <url> --label <name>\n  2. ctx path <name>, then rg source/tests/examples\n  3. ctx query <question> --label <docs-name> as fallback\nRun `ctx guides` for workflows, `ctx <command> --help` for examples."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 }
 
-const AGENT_HELP: &str = "Efficient grounding workflow:
-  1. Inspect the live project and its real manifest or lockfile; live source wins.
-  2. Run `ctx show --cwd <repo>` to see the authoritative references already linked here.
-  3. Use `ctx path <source-label> --cwd <repo>` plus normal code tools for pinned source.
-  4. Use `ctx query \"<specific question>\" --label <docs-label> --cwd <repo>` for fetched docs or research.
-  5. Add authoritative references with a descriptive label and reason, then link them to the project:
-     ctx add <official-docs-or-version-pinned-github-url> --label <name> --reason \"<why authoritative>\" --cwd <repo>
-     ctx link <name> --reason \"<why this project needs it>\" --cwd <repo>
-  6. Run `ctx sync --cwd <repo>` to restore or reindex linked references.
-
-Dependency grounding:
-  Read the project's real lockfile/manifest, resolve the exact dependency version, then add or link that version's official docs or version-pinned source. ctx does not guess dependency versions.
-
-Project setup:
-  `ctx init --cwd <repo>` creates the project manifest and root AGENTS.md grounding block.
-  `ctx agents --cwd <repo>` idempotently refreshes only that generated AGENTS.md block.
-
-Gotchas:
-  Always pass --cwd for the repo you mean.
-  Use ctx when authoritative external or pinned references matter; it is not mandatory ceremony.
-  Narrow query with --label and --kind when you know the target.
-  Unscoped/global query is discovery; random lexical overlap can win.
-  Agent evidence is matched chunks plus small local context, not a whole-doc summary.
-  Query searches linked docs and research; use ctx path plus rg for sources.
-  Default docs crawl is up to 2048 pages, not a completeness guarantee.
-  Each fetched docs page is capped at 5 MiB; use --max-pages when needed.";
-
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize .ctx/ctx.json and update AGENTS.md.
-    Init {
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-        #[arg(long)]
-        no_agents: bool,
-    },
-    /// Idempotently refresh the generated root AGENTS.md grounding block.
-    Agents {
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-    },
-    /// Add a source, docs, or research paper URL to the global cache.
+    /// Add a source, docs, or paper URL to the global cache.
+    #[command(
+        after_help = "Docs crawl defaults: up to 2048 pages, capped at 5 MiB per page.\n\nExamples:\n  ctx add https://github.com/clap-rs/clap/tree/v4.6.1 --label clap-4.6.1-src\n  ctx add https://docs.rs/clap/4.6.1/clap/ --label clap-docs --reason 'locked API docs'"
+    )]
     Add {
         url: String,
         #[arg(long)]
         label: Option<String>,
         #[arg(long)]
         reason: Option<String>,
-        #[arg(long)]
-        no_index: bool,
         #[arg(long, default_value_t = DEFAULT_MAX_PAGES)]
         max_pages: usize,
         #[arg(long, default_value_t = DEFAULT_CRAWL_CONCURRENCY)]
         concurrency: usize,
-        #[arg(long)]
-        cwd: Option<PathBuf>,
     },
-    /// Refresh a queryable snapshot or report a source pin.
-    Update {
-        target: String,
+    /// List cached resources and optional snapshot history.
+    #[command(
+        after_help = "Examples:\n  ctx list\n  ctx list clap-docs --snapshots\n  ctx list --kind source"
+    )]
+    List {
+        target: Option<String>,
         #[arg(long)]
-        force: bool,
-        #[arg(long, default_value_t = DEFAULT_MAX_PAGES)]
-        max_pages: usize,
-        #[arg(long, default_value_t = DEFAULT_CRAWL_CONCURRENCY)]
-        concurrency: usize,
+        kind: Option<ResourceKind>,
         #[arg(long)]
-        cwd: Option<PathBuf>,
+        snapshots: bool,
     },
-    /// Ensure manifest resources exist locally and are indexed.
-    Sync {
-        #[arg(long)]
-        reindex: bool,
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-    },
-    /// Query project docs and research papers.
+    /// Print a cached source checkout path.
+    #[command(after_help = "Examples:\n  ctx path clap-4.6.1-src")]
+    Path { target: String },
+    /// Search cached docs and research papers.
+    #[command(
+        after_help = "Unscoped query is discovery, not proof. Prefer a known label and a specific question.\nWhen source is unavailable or insufficient, add authoritative docs or a paper and query that label.\nEvidence is matched chunks plus small local context, not a whole-doc summary.\n\nExamples:\n  ctx query 'repeatable arguments' --label clap-docs\n  ctx query 'retrieval fusion' --label paper-a --label paper-b\n  ctx query 'old API' --label clap-docs --snapshot 20260101T000000Z-012345abcdef"
+    )]
     Query {
         question: String,
         #[arg(long, default_value_t = DEFAULT_TOP_K)]
@@ -128,236 +82,169 @@ enum Commands {
         budget: usize,
         #[arg(long)]
         debug: bool,
-        #[arg(long)]
-        label: Option<String>,
+        #[arg(long, action = ArgAction::Append)]
+        label: Vec<String>,
         #[arg(long)]
         kind: Option<QueryKind>,
         #[arg(long)]
-        cwd: Option<PathBuf>,
+        snapshot: Option<String>,
     },
-    /// Show project or resource state.
-    Show {
-        target: Option<String>,
-        #[arg(long)]
-        snapshots: bool,
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-    },
-    /// List globally cached resources.
-    List {
-        #[arg(long)]
-        project: bool,
-        #[arg(long)]
-        kind: Option<ResourceKind>,
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-    },
-    /// Print the local path for a cached GitHub source.
-    Path {
+    /// Refresh docs/papers or report a pinned source.
+    #[command(after_help = "Examples:\n  ctx update clap-docs\n  ctx update clap-docs --force")]
+    Update {
         target: String,
         #[arg(long)]
-        cwd: Option<PathBuf>,
+        force: bool,
+        #[arg(long, default_value_t = DEFAULT_MAX_PAGES)]
+        max_pages: usize,
+        #[arg(long, default_value_t = DEFAULT_CRAWL_CONCURRENCY)]
+        concurrency: usize,
     },
-    /// Link a global resource into this project.
-    Link {
-        target: String,
-        #[arg(long)]
-        reason: Option<String>,
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-    },
-    /// Unlink a resource from this project manifest.
-    Unlink {
-        target: String,
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-    },
-    /// Move the current manifest pointer for a resource.
-    Use {
-        label: String,
-        pointer: String,
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-    },
-    /// Remove a global resource.
+    /// Remove a resource, optionally pruning its cached files.
+    #[command(
+        after_help = "Examples:\n  ctx remove clap-docs\n  ctx remove clap-4.6.1-src --prune-cache"
+    )]
     Remove {
         target: String,
         #[arg(long)]
         prune_cache: bool,
-        #[arg(long)]
-        cwd: Option<PathBuf>,
     },
-    /// Check manifest, cache, and index health.
-    Doctor {
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-    },
-    /// Copy the current ctx binary into ~/.local/bin or a requested directory.
+    /// Check global cache and index health.
+    #[command(after_help = "Examples:\n  ctx doctor")]
+    Doctor,
+    /// Copy the binary and installation metadata.
+    #[command(after_help = "Examples:\n  ctx install --force\n  ctx install --bin-dir ./bin")]
     Install {
         #[arg(long)]
         bin_dir: Option<PathBuf>,
         #[arg(long)]
         force: bool,
     },
+    /// Read embedded source-first workflow guides.
+    #[command(after_help = "Examples:\n  ctx guides\n  ctx guides pin")]
+    Guides { name: Option<String> },
 }
 
 pub fn run() -> Result<()> {
-    let mut args = env::args_os();
-    let _program = args.next();
-    match args.next().as_deref().and_then(|arg| arg.to_str()) {
-        None | Some("--help" | "-h") => {
-            print_root_help();
-            return Ok(());
-        }
-        _ => {}
-    }
     let cli = Cli::parse();
-    let Some(command) = cli.command else {
-        print_root_help();
-        return Ok(());
-    };
-    match command {
-        Commands::Init { cwd, no_agents } => init(cwd, !no_agents),
-        Commands::Agents { cwd } => agents(cwd),
-        Commands::Add {
+    match cli.command {
+        None => {
+            Cli::command().print_help()?;
+            println!();
+            Ok(())
+        }
+        Some(Commands::Add {
             url,
             label,
             reason,
-            no_index,
             max_pages,
             concurrency,
-            cwd,
-        } => add(cwd, &url, label, reason, !no_index, max_pages, concurrency),
-        Commands::Update {
+        }) => add(&url, label, reason, max_pages, concurrency),
+        Some(Commands::List {
             target,
-            force,
-            max_pages,
-            concurrency,
-            cwd,
-        } => update(cwd, &target, force, max_pages, concurrency),
-        Commands::Sync { reindex, cwd } => sync(cwd, reindex),
-        Commands::Query {
+            kind,
+            snapshots,
+        }) => list(target, kind, snapshots),
+        Some(Commands::Path { target }) => print_source_path(&target),
+        Some(Commands::Query {
             question,
             top_k,
             budget,
             debug,
             label,
             kind,
-            cwd,
-        } => query(QueryCommand {
-            cwd,
+            snapshot,
+        }) => query(QueryCommand {
             question,
             top_k,
             budget_tokens: budget,
             debug,
             label,
             kind,
+            snapshot,
         }),
-        Commands::Show {
+        Some(Commands::Update {
             target,
-            snapshots,
-            cwd,
-        } => show(cwd, target, snapshots),
-        Commands::List { project, kind, cwd } => list(cwd, project, kind),
-        Commands::Path { target, cwd } => print_source_path(cwd, &target),
-        Commands::Link {
-            target,
-            reason,
-            cwd,
-        } => link(cwd, &target, reason),
-        Commands::Unlink { target, cwd } => unlink(cwd, &target),
-        Commands::Use {
-            label,
-            pointer,
-            cwd,
-        } => use_pointer(cwd, &label, &pointer),
-        Commands::Remove {
+            force,
+            max_pages,
+            concurrency,
+        }) => update(&target, force, max_pages, concurrency),
+        Some(Commands::Remove {
             target,
             prune_cache,
-            cwd,
-        } => remove(cwd, &target, prune_cache),
-        Commands::Doctor { cwd } => doctor(cwd),
-        Commands::Install { bin_dir, force } => install(bin_dir, force),
-    }
-}
-
-fn print_root_help() {
-    let help = Cli::command().render_help().to_string();
-    if let Some(index) = help.find("\n\nUsage:") {
-        print!("{}\n\n{}{}", &help[..index], AGENT_HELP, &help[index..]);
-    } else {
-        print!("{help}\n\n{AGENT_HELP}\n");
+        }) => remove(&target, prune_cache),
+        Some(Commands::Doctor) => doctor(),
+        Some(Commands::Install { bin_dir, force }) => install(bin_dir, force),
+        Some(Commands::Guides { name }) => guides(name.as_deref()),
     }
 }
 
 struct QueryCommand {
-    cwd: Option<PathBuf>,
     question: String,
     top_k: usize,
     budget_tokens: usize,
     debug: bool,
-    label: Option<String>,
+    label: Vec<String>,
     kind: Option<QueryKind>,
-}
-
-fn init(cwd: Option<PathBuf>, write_agents: bool) -> Result<()> {
-    let app = AppContext::load(cwd)?;
-    let paths = &app.paths;
-    app.init_storage()?;
-
-    if !paths.manifest_path.exists() {
-        write_manifest(
-            &paths.manifest_path,
-            &Manifest {
-                version: 1,
-                defaults: Defaults::default(),
-                resources: Vec::new(),
-            },
-        )?;
-    }
-
-    if write_agents {
-        upsert_agents_block(&paths.project_root)?;
-    }
-
-    print_toon(CommandStatus {
-        command: "init",
-        status: "ok",
-        result: json!({
-            "project_root": paths.project_root,
-            "manifest_path": paths.manifest_path,
-            "agents_updated": write_agents,
-        }),
-    })
-}
-
-fn agents(cwd: Option<PathBuf>) -> Result<()> {
-    let app = AppContext::load(cwd)?;
-    upsert_agents_block(&app.paths.project_root)?;
-    print_toon(CommandStatus {
-        command: "agents",
-        status: "ok",
-        result: json!({
-            "project_root": app.paths.project_root,
-            "agents_path": app.paths.project_root.join("AGENTS.md"),
-            "agents_updated": true,
-        }),
-    })
+    snapshot: Option<String>,
 }
 
 fn add(
-    cwd: Option<PathBuf>,
     input_url: &str,
     label: Option<String>,
-    reason: Option<String>,
-    should_index: bool,
+    mut reason: Option<String>,
     max_pages: usize,
     concurrency: usize,
 ) -> Result<()> {
-    let app = AppContext::load(cwd)?;
+    let app = AppContext::load()?;
     let paths = &app.paths;
     app.ensure_global_storage()?;
     let resolved = resolve_input(input_url)?;
+    let (stored_url, resolved_label) = match &resolved {
+        ResolvedInput::GithubSource { repo, .. } => {
+            (input_url.to_string(), label.unwrap_or_else(|| repo.clone()))
+        }
+        ResolvedInput::Docs { url } => (
+            url.clone(),
+            label.unwrap_or_else(|| default_label_for_url(url)),
+        ),
+        ResolvedInput::ResearchPaper { registry, id, url } => (
+            url.clone(),
+            label.unwrap_or_else(|| research_paper_label(*registry, id).replace('/', "-")),
+        ),
+    };
+    if let Some(mut existing) = list_global_resource_models(&paths.db_path, None)?
+        .into_iter()
+        .find(|resource| resource.label == resolved_label)
+    {
+        if existing.url != stored_url {
+            bail!(
+                "label '{}' is already used by {}; remove it or choose another label",
+                resolved_label,
+                existing.url
+            );
+        }
+        if existing
+            .local_path
+            .as_deref()
+            .map(Path::new)
+            .is_some_and(Path::exists)
+        {
+            if let Some(reason) = reason {
+                existing.reason = Some(reason);
+                upsert_global_resource(&paths.db_path, &existing, None)?;
+            }
+            return print_toon(CommandStatus {
+                command: "add",
+                status: "ok",
+                result: json!({"resource": existing, "existing": true}),
+            });
+        }
+        if reason.is_none() {
+            reason = existing.reason;
+        }
+    }
+    let label = resolved_label;
     let now = timestamp();
 
     let (resource, extra) = match resolved {
@@ -367,15 +254,23 @@ fn add(
             requested_ref,
             clone_url,
         } => {
-            let label = label.unwrap_or_else(|| repo.clone());
             let id = stable_id(&format!("source:{clone_url}:{label}"));
-            let (commit, path) = cache_github_source(
-                &paths.home,
-                &owner,
-                &repo,
-                requested_ref.as_deref(),
-                &clone_url,
-            )?;
+            let (commit, path) = if let Some(reference) = requested_ref.as_deref()
+                && reference.len() == 40
+                && reference
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                cache_github_source_pointer(&paths.home, &owner, &repo, reference, &clone_url)?
+            } else {
+                cache_github_source(
+                    &paths.home,
+                    &owner,
+                    &repo,
+                    requested_ref.as_deref(),
+                    &clone_url,
+                )?
+            };
             let resource = Resource {
                 id: id.clone(),
                 label,
@@ -391,7 +286,6 @@ fn add(
             (resource, json!({"commit": commit, "path": path}))
         }
         ResolvedInput::Docs { url } => {
-            let label = label.unwrap_or_else(|| default_label_for_url(&url));
             let id = stable_id(&format!("docs:{url}:{label}"));
             let snapshot = snapshot_docs(&paths.home, &id, &url, max_pages, concurrency)?;
             let resource = Resource {
@@ -406,9 +300,7 @@ fn add(
                 updated_at: now.clone(),
             };
             upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
-            if should_index {
-                index_snapshot(&paths.db_path, &resource, &snapshot)?;
-            }
+            index_snapshot(&paths.db_path, &resource, &snapshot)?;
             (resource, json!({"snapshot": snapshot}))
         }
         ResolvedInput::ResearchPaper {
@@ -416,8 +308,6 @@ fn add(
             id: arxiv_id,
             url,
         } => {
-            let label = label
-                .unwrap_or_else(|| research_paper_label(registry, &arxiv_id).replace('/', "-"));
             let id = stable_id(&format!(
                 "research-paper:{}:{url}:{label}",
                 research_paper_registry_name(registry)
@@ -439,9 +329,7 @@ fn add(
                 updated_at: now.clone(),
             };
             upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
-            if should_index {
-                index_snapshot(&paths.db_path, &resource, &snapshot)?;
-            }
+            index_snapshot(&paths.db_path, &resource, &snapshot)?;
             (resource, json!({"snapshot": snapshot}))
         }
     };
@@ -456,25 +344,11 @@ fn add(
     })
 }
 
-fn update(
-    cwd: Option<PathBuf>,
-    target: &str,
-    force: bool,
-    max_pages: usize,
-    concurrency: usize,
-) -> Result<()> {
-    let app = AppContext::load(cwd)?;
+fn update(target: &str, force: bool, max_pages: usize, concurrency: usize) -> Result<()> {
+    let app = AppContext::load()?;
     let paths = &app.paths;
     app.ensure_global_storage()?;
-    let mut manifest = read_optional_manifest(paths)?;
-    let linked_index = manifest
-        .as_ref()
-        .and_then(|manifest| find_manifest_resource_index(manifest, target).ok());
-    let mut resource = if let (Some(manifest), Some(index)) = (manifest.as_ref(), linked_index) {
-        trusted_manifest_resource(&paths.db_path, &manifest.resources[index])?
-    } else {
-        find_global_resource(&paths.db_path, target)?
-    };
+    let mut resource = find_global_resource(&paths.db_path, target)?;
 
     match resource.kind {
         ResourceKind::Source => {
@@ -482,7 +356,7 @@ fn update(
                 command: "update",
                 status: "ok",
                 result: json!({
-                    "message": "source resources are pinned; add or use an explicit ref to change them",
+                    "message": "source resources are pinned; add an explicit ref under a new label to change them",
                     "resource": resource,
                 }),
             })?;
@@ -501,10 +375,6 @@ fn update(
                 resource.current = snapshot.snapshot_id.clone();
                 resource.local_path = Some(snapshot.path.clone());
                 resource.updated_at = timestamp();
-                if let (Some(manifest), Some(index)) = (&mut manifest, linked_index) {
-                    manifest.resources[index] = resource.clone();
-                    write_manifest(&paths.manifest_path, manifest)?;
-                }
                 upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
                 index_snapshot(&paths.db_path, &resource, &snapshot)?;
             } else {
@@ -533,10 +403,6 @@ fn update(
                 resource.current = snapshot.snapshot_id.clone();
                 resource.local_path = Some(snapshot.path.clone());
                 resource.updated_at = timestamp();
-                if let (Some(manifest), Some(index)) = (&mut manifest, linked_index) {
-                    manifest.resources[index] = resource.clone();
-                    write_manifest(&paths.manifest_path, manifest)?;
-                }
                 upsert_global_resource(&paths.db_path, &resource, Some(&snapshot))?;
                 index_snapshot(&paths.db_path, &resource, &snapshot)?;
             } else {
@@ -556,166 +422,17 @@ fn update(
     Ok(())
 }
 
-fn sync(cwd: Option<PathBuf>, reindex: bool) -> Result<()> {
-    let app = AppContext::load(cwd)?;
-    let paths = &app.paths;
-    app.ensure_project()?;
-    ensure_db(&paths.db_path)?;
-    let manifest = read_manifest(&paths.manifest_path)?;
-    let mut checked = Vec::new();
-
-    for manifest_resource in &manifest.resources {
-        let resource = trusted_manifest_resource(&paths.db_path, manifest_resource).ok();
-        let mut rehydrated = false;
-        let mut message = None::<String>;
-        let ready = match resource.as_ref() {
-            Some(resource) if resource.kind == ResourceKind::Source => {
-                let path_ready = resource
-                    .local_path
-                    .as_deref()
-                    .map(Path::new)
-                    .is_some_and(Path::exists);
-                if path_ready {
-                    true
-                } else {
-                    match rehydrate_source_from_manifest(paths, manifest_resource) {
-                        Ok(_) => {
-                            rehydrated = true;
-                            true
-                        }
-                        Err(error) => {
-                            message = Some(error.to_string());
-                            false
-                        }
-                    }
-                }
-            }
-            Some(resource)
-                if matches!(
-                    resource.kind,
-                    ResourceKind::Docs | ResourceKind::ResearchPaper
-                ) =>
-            {
-                let path_ready = resource
-                    .local_path
-                    .as_deref()
-                    .map(Path::new)
-                    .is_some_and(Path::exists);
-                if reindex
-                    && path_ready
-                    && let Some(path) = &resource.local_path
-                {
-                    let snapshot = SnapshotMetadata {
-                        snapshot_id: resource.current.clone(),
-                        fetched_at: resource.updated_at.clone(),
-                        source_url: resource.url.clone(),
-                        content_hash: current_content_hash(
-                            &paths.db_path,
-                            &resource.id,
-                            &resource.current,
-                        )?
-                        .unwrap_or_default(),
-                        page_count: 0,
-                        path: path.clone(),
-                        extra: None,
-                    };
-                    index_snapshot(&paths.db_path, resource, &snapshot)?;
-                }
-                path_ready
-            }
-            None if manifest_resource.kind == ResourceKind::Source => {
-                match rehydrate_source_from_manifest(paths, manifest_resource) {
-                    Ok(_) => {
-                        rehydrated = true;
-                        true
-                    }
-                    Err(error) => {
-                        message = Some(error.to_string());
-                        false
-                    }
-                }
-            }
-            None if matches!(
-                manifest_resource.kind,
-                ResourceKind::Docs | ResourceKind::ResearchPaper
-            ) =>
-            {
-                message = Some(
-                    "queryable snapshots cannot be rebuilt from a project manifest alone; run ctx add or ctx update on this machine".to_string(),
-                );
-                false
-            }
-            _ => false,
-        };
-        checked.push(json!({
-            "label": manifest_resource.label,
-            "kind": manifest_resource.kind,
-            "ready": ready,
-            "rehydrated": rehydrated,
-            "message": message,
-        }));
-    }
-
-    print_toon(CommandStatus {
-        command: "sync",
-        status: "ok",
-        result: json!({
-            "project_root": paths.project_root,
-            "reindexed": reindex,
-            "resources": checked,
-        }),
-    })
-}
-
-fn rehydrate_source_from_manifest(
-    paths: &crate::models::RuntimePaths,
-    manifest_resource: &Resource,
-) -> Result<Resource> {
-    let ResolvedInput::GithubSource {
-        owner,
-        repo,
-        clone_url,
-        ..
-    } = resolve_input(&manifest_resource.url)?
-    else {
-        bail!(
-            "source manifest URL is not a supported GitHub source: {}",
-            manifest_resource.url
-        );
-    };
-    let (commit, path) = cache_github_source_pointer(
-        &paths.home,
-        &owner,
-        &repo,
-        &manifest_resource.current,
-        &clone_url,
-    )?;
-    let mut resource = manifest_resource.clone();
-    resource.current = commit;
-    resource.local_path = Some(path.display().to_string());
-    resource.updated_at = timestamp();
-    upsert_global_resource(&paths.db_path, &resource, None)?;
-    Ok(resource)
-}
-
 fn query(command: QueryCommand) -> Result<()> {
-    let app = AppContext::load(command.cwd)?;
-    let paths = &app.paths;
+    let app = AppContext::load()?;
     app.ensure_global_storage()?;
-    let manifest = read_optional_manifest(paths)?;
-    let scope = if manifest.is_some() {
-        "project"
-    } else {
-        "global"
-    };
-    let query_kind = command.kind.map(Into::into);
-    let allowed = if let Some(manifest) = &manifest {
-        allowed_resource_ids(manifest, command.label.as_deref(), query_kind)?
-    } else {
-        allowed_global_resource_ids(&paths.db_path, command.label.as_deref(), query_kind)?
-    };
+    let allowed = allowed_global_resource_ids(
+        &app.paths.db_path,
+        &command.label,
+        command.kind.map(Into::into),
+        command.snapshot.as_deref(),
+    )?;
     let results = query_index(
-        &paths.db_path,
+        &app.paths.db_path,
         &command.question,
         &allowed,
         command.top_k,
@@ -726,113 +443,51 @@ fn query(command: QueryCommand) -> Result<()> {
         command: "query",
         status: "ok",
         result: json!({
-            "question": command.question,
-            "top_k": command.top_k,
-            "budget_tokens": command.budget_tokens,
-            "project_root": paths.project_root,
-            "scope": scope,
-            "debug": command.debug,
-            "mode": "agent",
-            "results": results,
+            "question": command.question, "top_k": command.top_k, "budget_tokens": command.budget_tokens,
+            "debug": command.debug, "mode": "agent", "results": results,
         }),
     })
 }
 
-fn show(cwd: Option<PathBuf>, target: Option<String>, snapshots: bool) -> Result<()> {
-    let app = AppContext::load(cwd)?;
-    let paths = &app.paths;
+fn list(target: Option<String>, kind: Option<ResourceKind>, snapshots: bool) -> Result<()> {
+    let app = AppContext::load()?;
     app.ensure_global_storage()?;
-    let manifest = read_optional_manifest(paths)?;
-    let scope = if manifest.is_some() {
-        "project"
-    } else {
-        "global"
-    };
     let resources = if let Some(target) = target {
-        if let Some(manifest) = &manifest {
-            find_manifest_resource(manifest, &target)
-                .cloned()
-                .or_else(|_| find_global_resource(&paths.db_path, &target))
-                .map(|resource| vec![resource])?
+        let resource = find_global_resource(&app.paths.db_path, &target)?;
+        if kind.is_none_or(|kind| resource.kind == kind) {
+            vec![resource]
         } else {
-            vec![find_global_resource(&paths.db_path, &target)?]
+            Vec::new()
         }
-    } else if let Some(manifest) = &manifest {
-        manifest.resources.clone()
     } else {
-        list_global_resource_models(&paths.db_path, None)?
+        list_global_resource_models(&app.paths.db_path, kind)?
     };
-    let snapshot_rows = if snapshots {
-        snapshots_for_resources(&paths.db_path, &resources)?
-    } else {
-        Vec::new()
-    };
-    print_toon(CommandStatus {
-        command: "show",
-        status: "ok",
-        result: json!({
-            "project_root": paths.project_root,
-            "manifest_path": paths.manifest_path,
-            "scope": scope,
-            "resources": resources,
-            "snapshots": snapshot_rows,
-        }),
-    })
-}
-
-fn list(cwd: Option<PathBuf>, project_only: bool, kind: Option<ResourceKind>) -> Result<()> {
-    let app = AppContext::load(cwd)?;
-    let paths = &app.paths;
-    ensure_db(&paths.db_path)?;
-    let project_resources = if project_only || paths.manifest_path.exists() {
-        read_manifest(&paths.manifest_path)
-            .map(|manifest| manifest.resources)
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let project_ids = project_resources
+    let ids = resources
         .iter()
-        .map(|resource| resource.id.clone())
-        .collect::<BTreeSet<_>>();
-    let rows = list_global_resources(&paths.db_path, kind)?;
-    let filtered = rows
+        .map(|resource| resource.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let rows = list_global_resources(&app.paths.db_path, kind)?
         .into_iter()
-        .filter(|row| !project_only || project_ids.contains(row["id"].as_str().unwrap_or_default()))
-        .map(|mut row| {
-            if let Some(object) = row.as_object_mut() {
-                let linked = object
-                    .get("id")
-                    .and_then(|id| id.as_str())
-                    .is_some_and(|id| project_ids.contains(id));
-                object.insert("linked_to_current_project".to_string(), json!(linked));
-            }
-            row
-        })
+        .filter(|row| row["id"].as_str().is_some_and(|id| ids.contains(id)))
         .collect::<Vec<_>>();
+    let snapshot_rows = if snapshots {
+        snapshots_for_resources(&app.paths.db_path, &resources)?
+    } else {
+        Vec::new()
+    };
     print_toon(CommandStatus {
         command: "list",
         status: "ok",
         result: json!({
-            "home": paths.home,
-            "resources": filtered,
+            "home": app.paths.home, "resources": rows, "snapshots": snapshot_rows,
         }),
     })
 }
 
-fn print_source_path(cwd: Option<PathBuf>, target: &str) -> Result<()> {
-    let app = AppContext::load(cwd)?;
-    let paths = &app.paths;
+fn print_source_path(target: &str) -> Result<()> {
+    let app = AppContext::load()?;
     app.ensure_global_storage()?;
-    let manifest = read_optional_manifest(paths)?;
-    let resource = if let Some(manifest) = &manifest {
-        match find_manifest_resource(manifest, target) {
-            Ok(resource) => trusted_manifest_resource(&paths.db_path, resource)?,
-            Err(_) => find_global_resource(&paths.db_path, target)?,
-        }
-    } else {
-        find_global_resource(&paths.db_path, target)?
-    };
+    let resource = find_global_resource(&app.paths.db_path, target)?;
     if resource.kind != ResourceKind::Source {
         bail!("ctx path only supports source resources");
     }
@@ -843,89 +498,21 @@ fn print_source_path(cwd: Option<PathBuf>, target: &str) -> Result<()> {
     Ok(())
 }
 
-fn trusted_manifest_resource(db_path: &Path, resource: &Resource) -> Result<Resource> {
-    let mut trusted = find_global_resource(db_path, &resource.id).with_context(|| {
-        format!(
-            "manifest resource '{}' is not in the global cache; run ctx add then ctx link",
-            resource.label
-        )
-    })?;
-    if resource.reason.is_some() {
-        trusted.reason = resource.reason.clone();
-    }
-    Ok(trusted)
-}
-
-fn link(cwd: Option<PathBuf>, target: &str, reason: Option<String>) -> Result<()> {
-    let app = AppContext::load(cwd)?;
-    let paths = &app.paths;
-    app.ensure_project()?;
-    let mut manifest = read_manifest(&paths.manifest_path)?;
-    let mut resource = find_global_resource(&paths.db_path, target)?;
-    if reason.is_some() {
-        resource.reason = reason;
-    }
-    upsert_manifest_resource(&mut manifest, resource.clone());
-    write_manifest(&paths.manifest_path, &manifest)?;
+fn doctor() -> Result<()> {
+    let app = AppContext::load()?;
+    app.ensure_global_storage()?;
     print_toon(CommandStatus {
-        command: "link",
+        command: "doctor",
         status: "ok",
         result: json!({
-            "resource": resource,
-            "manifest_path": paths.manifest_path,
+            "home": app.paths.home, "db_path": app.paths.db_path, "db_ok": true,
+            "install": default_install_status()?,
         }),
     })
 }
 
-fn unlink(cwd: Option<PathBuf>, target: &str) -> Result<()> {
-    let app = AppContext::load(cwd)?;
-    let paths = &app.paths;
-    app.ensure_project()?;
-    let mut manifest = read_manifest(&paths.manifest_path)?;
-    let removed = find_manifest_resource(&manifest, target)?.clone();
-    manifest.resources.retain(|resource| {
-        resource.label != target && resource.url != target && resource.id != target
-    });
-    write_manifest(&paths.manifest_path, &manifest)?;
-    print_toon(CommandStatus {
-        command: "unlink",
-        status: "ok",
-        result: json!({
-            "resource": removed,
-            "manifest_path": paths.manifest_path,
-        }),
-    })
-}
-
-fn use_pointer(cwd: Option<PathBuf>, label: &str, pointer: &str) -> Result<()> {
-    let app = AppContext::load(cwd)?;
-    let paths = &app.paths;
-    app.ensure_project()?;
-    let mut manifest = read_manifest(&paths.manifest_path)?;
-    let index = find_manifest_resource_index(&manifest, label)?;
-    match manifest.resources[index].kind {
-        ResourceKind::Source => validate_source_pointer(&manifest.resources[index], pointer)?,
-        ResourceKind::Docs | ResourceKind::ResearchPaper => {
-            let snapshot_path =
-                snapshot_path_for_pointer(&paths.db_path, &manifest.resources[index].id, pointer)?
-                    .ok_or_else(|| anyhow!("snapshot not found for {}: {pointer}", label))?;
-            manifest.resources[index].local_path = Some(snapshot_path);
-        }
-    }
-    manifest.resources[index].current = pointer.to_string();
-    manifest.resources[index].updated_at = timestamp();
-    write_manifest(&paths.manifest_path, &manifest)?;
-    print_toon(CommandStatus {
-        command: "use",
-        status: "ok",
-        result: json!({
-            "resource": manifest.resources[index],
-        }),
-    })
-}
-
-fn remove(cwd: Option<PathBuf>, target: &str, prune_cache: bool) -> Result<()> {
-    let app = AppContext::load(cwd)?;
+fn remove(target: &str, prune_cache: bool) -> Result<()> {
+    let app = AppContext::load()?;
     let paths = &app.paths;
     app.ensure_global_storage()?;
     let removed = find_global_resource(&paths.db_path, target)?;
@@ -941,41 +528,6 @@ fn remove(cwd: Option<PathBuf>, target: &str, prune_cache: bool) -> Result<()> {
     })
 }
 
-fn doctor(cwd: Option<PathBuf>) -> Result<()> {
-    let app = AppContext::load(cwd)?;
-    let paths = &app.paths;
-    let manifest_exists = paths.manifest_path.exists();
-    let db_ok = ensure_db(&paths.db_path).is_ok();
-    let resource_count = if manifest_exists {
-        read_manifest(&paths.manifest_path)
-            .map(|manifest| manifest.resources.len())
-            .unwrap_or_default()
-    } else {
-        0
-    };
-    print_toon(CommandStatus {
-        command: "doctor",
-        status: "ok",
-        result: json!({
-            "project_root": paths.project_root,
-            "manifest_exists": manifest_exists,
-            "home": paths.home,
-            "db_path": paths.db_path,
-            "db_ok": db_ok,
-            "install": default_install_status()?,
-            "project_resource_count": resource_count,
-        }),
-    })
-}
-
-fn read_optional_manifest(paths: &crate::models::RuntimePaths) -> Result<Option<Manifest>> {
-    if paths.manifest_path.exists() {
-        Ok(Some(read_manifest(&paths.manifest_path)?))
-    } else {
-        Ok(None)
-    }
-}
-
 fn research_paper_label(registry: ResearchPaperRegistry, id: &str) -> String {
     match registry {
         ResearchPaperRegistry::Arxiv => format!("arxiv-{id}"),
@@ -986,4 +538,63 @@ fn research_paper_registry_name(registry: ResearchPaperRegistry) -> &'static str
     match registry {
         ResearchPaperRegistry::Arxiv => "arxiv",
     }
+}
+
+fn guides(name: Option<&str>) -> Result<()> {
+    let guides = [
+        (
+            "pin",
+            "Pin the exact installed version and retain restore commands.",
+            include_str!("../guides/pin.md"),
+        ),
+        (
+            "idiomatic-usage",
+            "Read upstream examples and tests for idiomatic API usage.",
+            include_str!("../guides/idiomatic-usage.md"),
+        ),
+        (
+            "copy-pattern",
+            "Mirror an upstream composition and its error handling.",
+            include_str!("../guides/copy-pattern.md"),
+        ),
+        (
+            "tests-as-spec",
+            "Read pinned test assertions as the API contract.",
+            include_str!("../guides/tests-as-spec.md"),
+        ),
+        (
+            "trace-api",
+            "Trace definitions, re-exports, defaults and callers.",
+            include_str!("../guides/trace-api.md"),
+        ),
+        (
+            "error-to-source",
+            "Trace exact error text to its guard and real caller.",
+            include_str!("../guides/error-to-source.md"),
+        ),
+        (
+            "upgrade-impact",
+            "Compare pinned subpaths and map every affected use.",
+            include_str!("../guides/upgrade-impact.md"),
+        ),
+        (
+            "why-history",
+            "Optionally deepen a shallow pin to explain history.",
+            include_str!("../guides/why-history.md"),
+        ),
+    ];
+    if let Some(name) = name {
+        let Some((_, _, content)) = guides.iter().find(|(guide, _, _)| *guide == name) else {
+            bail!("unknown guide '{name}'; run `ctx guides` to list guides");
+        };
+        print!("{content}");
+    } else {
+        println!(
+            "Live code wins over cached references.\nResolve exact installed versions; do not guess.\nCite file:line @ SHA."
+        );
+        for (name, summary, _) in guides {
+            println!("{name}  {summary}");
+        }
+    }
+    Ok(())
 }

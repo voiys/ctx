@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use assert_cmd::Command;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tempfile::TempDir;
 use tiny_http::{Response, Server};
 
@@ -36,28 +36,10 @@ impl TestProject {
         command
     }
 
-    fn manifest(&self) -> Value {
-        let raw = fs::read_to_string(self.root.path().join(".ctx/ctx.json")).unwrap();
-        serde_json::from_str(&raw).unwrap()
-    }
-
-    fn resource_current(&self, label: &str) -> String {
-        self.manifest()["resources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|resource| resource["label"] == label)
-            .unwrap()["current"]
-            .as_str()
-            .unwrap()
-            .to_string()
-    }
-
     fn resource_path(&self, label: &str) -> String {
         let output = self
             .ctx()
-            .args(["list", "--cwd"])
-            .arg(self.root.path())
+            .args(["list"])
             .assert()
             .success()
             .get_output()
@@ -96,15 +78,6 @@ impl TestProject {
             }
         }
         panic!("no local_path for {label} in ctx list output:\n{output}");
-    }
-
-    fn assert_manifest_has_no_local_paths(&self) {
-        for resource in self.manifest()["resources"].as_array().unwrap() {
-            assert!(
-                resource.get("local_path").is_none(),
-                "manifest leaked local_path: {resource}"
-            );
-        }
     }
 
     fn ctx_with_git_config(&self, git_config: &Path) -> Command {
@@ -209,90 +182,26 @@ fn root_help_explains_the_efficient_grounding_workflow_before_usage() {
             .stdout
             .clone();
         let stdout = String::from_utf8(output).unwrap();
-        let hint = stdout.find("Efficient grounding workflow:").unwrap();
-        let usage = stdout.find("Usage:").unwrap();
-
-        assert!(hint < usage, "{stdout}");
-        assert!(stdout.contains("ctx show --cwd <repo>"));
         assert!(
-            stdout.contains("ctx query \"<specific question>\" --label <docs-label> --cwd <repo>")
+            stdout.find("Offline reference workflow:").unwrap() < stdout.find("Usage:").unwrap()
         );
-        assert!(stdout.contains("real lockfile/manifest"));
-        assert!(stdout.contains("official docs or version-pinned source"));
-        assert!(stdout.contains("ctx agents --cwd <repo>"));
-        assert!(stdout.contains("Unscoped/global query is discovery"));
-        assert!(stdout.contains("matched chunks plus small local context"));
-        assert!(stdout.contains("Default docs crawl is up to 2048 pages"));
-        assert!(stdout.contains("not mandatory ceremony"));
-        assert!(!stdout.contains("ledger"));
-        assert!(!stdout.contains("notes"));
-        assert!(!stdout.contains("  memory"));
-        assert!(!stdout.contains("  hook"));
-        assert!(!stdout.contains("  recall"));
-        assert!(!stdout.contains("  remember"));
+        assert!(stdout.contains("ctx guides"));
+        assert!(stdout.contains("Usage:"));
+        for obsolete in [
+            "--cwd",
+            "ctx init",
+            "ctx link",
+            "AGENTS",
+            "ledger",
+            "notes",
+            "  memory",
+            "  hook",
+            "  recall",
+            "  remember",
+        ] {
+            assert!(!stdout.contains(obsolete), "{stdout}");
+        }
     }
-}
-
-#[test]
-fn init_and_agents_write_idempotent_grounding_guidance() {
-    let project = TestProject::new();
-    fs::write(
-        project.root.path().join("AGENTS.md"),
-        "# User guidance\n\nKeep this exact line.\n",
-    )
-    .unwrap();
-
-    project
-        .ctx()
-        .args(["init", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-
-    let agents_path = project.root.path().join("AGENTS.md");
-    let agents = fs::read_to_string(&agents_path).unwrap();
-    assert!(agents.contains("authoritative external or version-pinned references"));
-    assert!(agents.contains("Live source and runtime behavior win"));
-    assert!(agents.contains("ctx show --cwd <repo>"));
-    assert!(agents.contains("ctx path <source-label> --cwd <repo>"));
-    assert!(agents.contains("ctx query \"<specific question>\" --label <label> --cwd <repo>"));
-    assert!(agents.contains("manifest or lockfile"));
-    assert!(agents.contains("ctx agents --cwd <repo>"));
-    assert!(!agents.contains("ledger"));
-    assert!(!agents.contains("notes"));
-    assert!(agents.contains("Keep this exact line."));
-    assert!(!agents.contains("memory"));
-    assert!(!agents.contains("hook"));
-
-    project
-        .ctx()
-        .args(["agents", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-
-    let agents = fs::read_to_string(agents_path).unwrap();
-    assert_eq!(agents.matches("<!-- ctx:start -->").count(), 1);
-    assert_eq!(agents.matches("<!-- ctx:end -->").count(), 1);
-    assert_eq!(agents.matches("Keep this exact line.").count(), 1);
-}
-
-#[cfg(unix)]
-#[test]
-fn init_refuses_symlinked_agents_file() {
-    let project = TestProject::new();
-    let outside = project.root.path().join("outside.md");
-    fs::write(&outside, "keep me").unwrap();
-    std::os::unix::fs::symlink(&outside, project.root.path().join("AGENTS.md")).unwrap();
-
-    project
-        .ctx()
-        .args(["init", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .failure();
-
-    assert_eq!(fs::read_to_string(outside).unwrap(), "keep me");
 }
 
 struct FixtureSite {
@@ -353,16 +262,9 @@ fn legacy_notes_data_is_wiped_on_open() {
     )]));
     project
         .ctx()
-        .args(["init", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    project
-        .ctx()
         .arg("add")
         .arg(format!("{}/current.md", site.base_url))
-        .args(["--label", "current-docs", "--cwd"])
-        .arg(project.root.path())
+        .args(["--label", "current-docs"])
         .assert()
         .success();
 
@@ -395,35 +297,8 @@ fn legacy_notes_data_is_wiped_on_open() {
         rusqlite::params![id],
     )
     .unwrap();
-    let mut manifest = project.manifest();
-    manifest["resources"].as_array_mut().unwrap().push(json!({
-        "id": id,
-        "label": id,
-        "kind": LEGACY_NOTES_KIND,
-        "url": "https://example.com/legacy",
-        "current": "snapshot",
-        "created_at": "2026-01-01",
-        "updated_at": "2026-01-01"
-    }));
-    fs::write(
-        project.root.path().join(".ctx/ctx.json"),
-        serde_json::to_string_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
-
-    for args in [
-        vec!["list"],
-        vec!["show"],
-        vec!["query", "migration_token"],
-        vec!["sync"],
-    ] {
-        project
-            .ctx()
-            .args(args)
-            .arg("--cwd")
-            .arg(project.root.path())
-            .assert()
-            .success();
+    for args in [vec!["list"], vec!["query", "migration_token"]] {
+        project.ctx().args(args).assert().success();
     }
     for table in ["resources", "snapshots", "chunks"] {
         let count: i64 = conn
@@ -444,20 +319,6 @@ fn legacy_notes_data_is_wiped_on_open() {
         .unwrap();
     assert_eq!(count, 0);
     assert!(!dir.exists());
-
-    project
-        .ctx()
-        .args(["link", "current-docs", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    assert!(
-        project.manifest()["resources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|resource| resource["kind"] != LEGACY_NOTES_KIND)
-    );
 }
 
 #[test]
@@ -472,8 +333,6 @@ fn global_docs_can_be_used_without_project_manifest() {
         .ctx()
         .arg("add")
         .arg(format!("{}/global.md", site.base_url))
-        .args(["--cwd"])
-        .arg(project.root.path())
         .args(["--label", "global-docs"])
         .assert()
         .success();
@@ -481,21 +340,19 @@ fn global_docs_can_be_used_without_project_manifest() {
 
     let query = project
         .ctx()
-        .args(["query", "CTX_GLOBAL_ONLY_TOKEN", "--cwd"])
-        .arg(project.root.path())
+        .args(["query", "CTX_GLOBAL_ONLY_TOKEN"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
     let query = String::from_utf8(query).unwrap();
-    assert!(query.contains("scope: global"));
+    assert!(!query.contains("scope:"));
     assert!(query.contains("CTX_GLOBAL_ONLY_TOKEN"));
 
     let show = project
         .ctx()
-        .args(["show", "global-docs", "--snapshots", "--cwd"])
-        .arg(project.root.path())
+        .args(["list", "global-docs", "--snapshots"])
         .assert()
         .success()
         .get_output()
@@ -507,15 +364,13 @@ fn global_docs_can_be_used_without_project_manifest() {
 
     project
         .ctx()
-        .args(["remove", "global-docs", "--cwd"])
-        .arg(project.root.path())
+        .args(["remove", "global-docs"])
         .assert()
         .success();
 
     let list = project
         .ctx()
-        .args(["list", "--cwd"])
-        .arg(project.root.path())
+        .args(["list"])
         .assert()
         .success()
         .get_output()
@@ -523,88 +378,6 @@ fn global_docs_can_be_used_without_project_manifest() {
         .clone();
     let list = String::from_utf8(list).unwrap();
     assert!(!list.contains("global-docs"));
-}
-
-#[test]
-fn project_link_adds_existing_global_resource_to_manifest() {
-    let project = TestProject::new();
-    let site = FixtureSite::new(HashMap::from([(
-        "/project.md".to_string(),
-        "Project linked docs mention CTX_PROJECT_LINKED_TOKEN.".to_string(),
-    )]));
-
-    project
-        .ctx()
-        .args(["init", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    project
-        .ctx()
-        .arg("add")
-        .arg(format!("{}/project.md", site.base_url))
-        .args(["--cwd"])
-        .arg(project.root.path())
-        .args(["--label", "project-docs"])
-        .assert()
-        .success();
-    assert_eq!(project.manifest()["resources"].as_array().unwrap().len(), 0);
-
-    let link = project
-        .ctx()
-        .args([
-            "link",
-            "project-docs",
-            "--reason",
-            "needed for tests",
-            "--cwd",
-        ])
-        .arg(project.root.path())
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let link = String::from_utf8(link).unwrap();
-    assert!(link.contains("command: link"));
-
-    let manifest = project.manifest();
-    assert_eq!(manifest["resources"][0]["label"], "project-docs");
-    assert_eq!(manifest["resources"][0]["reason"], "needed for tests");
-    project.assert_manifest_has_no_local_paths();
-
-    let query = project
-        .ctx()
-        .args(["query", "CTX_PROJECT_LINKED_TOKEN", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let query = String::from_utf8(query).unwrap();
-    assert!(query.contains("scope: project"));
-    assert!(query.contains("CTX_PROJECT_LINKED_TOKEN"));
-
-    project
-        .ctx()
-        .args(["unlink", "project-docs", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    assert_eq!(project.manifest()["resources"].as_array().unwrap().len(), 0);
-
-    let global_query = project
-        .ctx()
-        .args(["query", "project linked token", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let global_query = String::from_utf8(global_query).unwrap();
-    assert!(!global_query.contains("Project linked docs"));
 }
 
 #[test]
@@ -619,15 +392,13 @@ fn query_can_find_docs_by_resource_label() {
         .ctx()
         .arg("add")
         .arg(format!("{}/runbook.md", site.base_url))
-        .args(["--label", "customer-oncall-playbook", "--cwd"])
-        .arg(project.root.path())
+        .args(["--label", "customer-oncall-playbook"])
         .assert()
         .success();
 
     let output = project
         .ctx()
-        .args(["query", "customer oncall playbook", "--cwd"])
-        .arg(project.root.path())
+        .args(["query", "customer oncall playbook"])
         .assert()
         .success()
         .get_output()
@@ -636,6 +407,56 @@ fn query_can_find_docs_by_resource_label() {
     let stdout = String::from_utf8(output).unwrap();
     assert!(stdout.contains("customer-oncall-playbook"));
     assert!(stdout.contains("CTX_LABEL_SEARCH_TOKEN"));
+
+    site.set("/second.md", "CTX_SECOND_TOKEN is another body marker.");
+    project
+        .ctx()
+        .args([
+            "add",
+            &format!("{}/second.md", site.base_url),
+            "--label",
+            "second-docs",
+        ])
+        .assert()
+        .success();
+    let output = project
+        .ctx()
+        .args([
+            "query",
+            "body marker",
+            "--label",
+            "customer-oncall-playbook",
+            "--label",
+            "second-docs",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("CTX_LABEL_SEARCH_TOKEN"));
+    assert!(output.contains("CTX_SECOND_TOKEN"));
+    let error = project
+        .ctx()
+        .args([
+            "query",
+            "body marker",
+            "--label",
+            "customer-oncall-playbook",
+            "--label",
+            "nope",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    assert!(
+        String::from_utf8(error)
+            .unwrap()
+            .contains("no queryable resource matched label")
+    );
 }
 
 #[test]
@@ -664,15 +485,13 @@ fn agent_query_groups_matches_with_surrounding_evidence() {
         .ctx()
         .arg("add")
         .arg(format!("{}/agent.md", site.base_url))
-        .args(["--label", "review-job-docs", "--cwd"])
-        .arg(project.root.path())
+        .args(["--label", "review-job-docs"])
         .assert()
         .success();
 
     let output = project
         .ctx()
-        .args(["query", "compensation gamma final approval delta", "--cwd"])
-        .arg(project.root.path())
+        .args(["query", "compensation gamma final approval delta"])
         .assert()
         .success()
         .get_output()
@@ -718,30 +537,15 @@ fn docs_crawl_recursively_indexes_linked_pages() {
 
     project
         .ctx()
-        .args(["init", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    project
-        .ctx()
         .arg("add")
         .arg(format!("{}/", site.base_url))
-        .args(["--cwd"])
-        .arg(project.root.path())
         .args(["--label", "fixture-docs"])
-        .assert()
-        .success();
-    project
-        .ctx()
-        .args(["link", "fixture-docs", "--cwd"])
-        .arg(project.root.path())
         .assert()
         .success();
 
     let output = project
         .ctx()
-        .args(["query", "CTX_SPECIAL_RETRY_FLAG", "--cwd"])
-        .arg(project.root.path())
+        .args(["query", "CTX_SPECIAL_RETRY_FLAG"])
         .assert()
         .success()
         .get_output()
@@ -753,8 +557,7 @@ fn docs_crawl_recursively_indexes_linked_pages() {
 
     let show = project
         .ctx()
-        .args(["show", "fixture-docs", "--snapshots", "--cwd"])
-        .arg(project.root.path())
+        .args(["list", "fixture-docs", "--snapshots"])
         .assert()
         .success()
         .get_output()
@@ -787,16 +590,13 @@ fn docs_crawl_falls_back_when_llms_txt_is_absent() {
         .ctx()
         .arg("add")
         .arg(format!("{}/docs", site.base_url))
-        .args(["--cwd"])
-        .arg(project.root.path())
         .args(["--label", "no-llms-docs"])
         .assert()
         .success();
 
     let output = project
         .ctx()
-        .args(["query", "CTX_NO_LLMS_GUIDE_TOKEN", "--cwd"])
-        .arg(project.root.path())
+        .args(["query", "CTX_NO_LLMS_GUIDE_TOKEN"])
         .assert()
         .success()
         .get_output()
@@ -834,16 +634,13 @@ fn docs_crawl_discovers_llms_txt_links() {
         .ctx()
         .arg("add")
         .arg(format!("{}/docs", site.base_url))
-        .args(["--cwd"])
-        .arg(project.root.path())
         .args(["--label", "llms-docs"])
         .assert()
         .success();
 
     let output = project
         .ctx()
-        .args(["query", "CTX_LLMS_API_TOKEN", "--cwd"])
-        .arg(project.root.path())
+        .args(["query", "CTX_LLMS_API_TOKEN"])
         .assert()
         .success()
         .get_output()
@@ -855,8 +652,7 @@ fn docs_crawl_discovers_llms_txt_links() {
 
     let show = project
         .ctx()
-        .args(["show", "llms-docs", "--snapshots", "--cwd"])
-        .arg(project.root.path())
+        .args(["list", "llms-docs", "--snapshots"])
         .assert()
         .success()
         .get_output()
@@ -885,16 +681,13 @@ fn query_debug_shows_llms_txt_source_prior() {
         .ctx()
         .arg("add")
         .arg(format!("{}/docs", site.base_url))
-        .args(["--cwd"])
-        .arg(project.root.path())
         .args(["--label", "prior-docs"])
         .assert()
         .success();
 
     let output = project
         .ctx()
-        .args(["query", "CTX_LLMS_PRIOR_TOKEN", "--debug", "--cwd"])
-        .arg(project.root.path())
+        .args(["query", "CTX_LLMS_PRIOR_TOKEN", "--debug"])
         .assert()
         .success()
         .get_output()
@@ -915,35 +708,67 @@ fn update_keeps_pointer_on_noop_and_moves_on_content_change() {
 
     project
         .ctx()
-        .args(["init", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    project
-        .ctx()
         .arg("add")
         .arg(format!("{}/", site.base_url))
-        .args(["--cwd"])
-        .arg(project.root.path())
         .args(["--label", "fixture-docs"])
         .assert()
         .success();
-    project
+    let list = project
         .ctx()
-        .args(["link", "fixture-docs", "--cwd"])
-        .arg(project.root.path())
+        .args(["list", "fixture-docs"])
         .assert()
-        .success();
-    let first = project.resource_current("fixture-docs");
-    project.assert_manifest_has_no_local_paths();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list = String::from_utf8(list).unwrap();
+    let first = list
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("current: ")
+                .map(|value| value.trim_matches('"').to_string())
+        })
+        .unwrap_or_else(|| {
+            let header = list
+                .lines()
+                .find(|line| line.trim().starts_with("resources["))
+                .unwrap();
+            let columns = header
+                .split('{')
+                .nth(1)
+                .unwrap()
+                .split('}')
+                .next()
+                .unwrap()
+                .split(',')
+                .collect::<Vec<_>>();
+            let index = columns
+                .iter()
+                .position(|column| *column == "current")
+                .unwrap();
+            let row = list
+                .lines()
+                .skip_while(|line| !line.trim().starts_with("resources["))
+                .nth(1)
+                .unwrap();
+            split_toon_row(row)[index].clone()
+        });
 
     project
         .ctx()
-        .args(["update", "fixture-docs", "--cwd"])
-        .arg(project.root.path())
+        .args(["update", "fixture-docs"])
         .assert()
         .success();
-    assert_eq!(project.resource_current("fixture-docs"), first);
+    let list = project
+        .ctx()
+        .args(["list", "fixture-docs"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(String::from_utf8(list).unwrap().contains(&first));
 
     site.set(
         "/",
@@ -951,282 +776,72 @@ fn update_keeps_pointer_on_noop_and_moves_on_content_change() {
     );
     project
         .ctx()
-        .args(["update", "fixture-docs", "--cwd"])
-        .arg(project.root.path())
+        .args(["update", "fixture-docs"])
         .assert()
         .success();
-    assert_ne!(project.resource_current("fixture-docs"), first);
-    project.assert_manifest_has_no_local_paths();
-}
-
-#[test]
-fn use_rejects_missing_snapshot() {
-    let project = TestProject::new();
-    let site = FixtureSite::new(HashMap::from([(
-        "/cache.md".to_string(),
-        "Documentation about cache pruning.".to_string(),
-    )]));
-
-    project
+    let list = project
         .ctx()
-        .args(["init", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    project
-        .ctx()
-        .arg("add")
-        .arg(format!("{}/cache.md", site.base_url))
-        .args(["--cwd"])
-        .arg(project.root.path())
-        .args(["--label", "docs"])
-        .assert()
-        .success();
-    project
-        .ctx()
-        .args(["link", "docs", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-
-    project
-        .ctx()
-        .args(["use", "docs", "missing-snapshot", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .failure();
-}
-
-#[test]
-fn legacy_manifest_local_path_is_stripped_on_next_write() {
-    let project = TestProject::new();
-    let site = FixtureSite::new(HashMap::from([(
-        "/portable.md".to_string(),
-        "Documentation about portable manifests.".to_string(),
-    )]));
-
-    project
-        .ctx()
-        .args(["init", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    project
-        .ctx()
-        .arg("add")
-        .arg(format!("{}/portable.md", site.base_url))
-        .args(["--cwd"])
-        .arg(project.root.path())
-        .args(["--label", "docs"])
-        .assert()
-        .success();
-    project
-        .ctx()
-        .args(["link", "docs", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    project.assert_manifest_has_no_local_paths();
-
-    let mut manifest = project.manifest();
-    manifest["resources"][0]["local_path"] = json!("/tmp/machine-local-cache-path");
-    fs::write(
-        project.root.path().join(".ctx/ctx.json"),
-        serde_json::to_string_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
-    assert!(
-        project.manifest()["resources"][0]
-            .get("local_path")
-            .is_some()
-    );
-
-    let current = project.resource_current("docs");
-    project
-        .ctx()
-        .args(["use", "docs", &current, "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    assert_eq!(project.resource_current("docs"), current);
-    project.assert_manifest_has_no_local_paths();
-}
-
-#[test]
-fn manifest_spoofed_paths_do_not_drive_update_sync_or_path() {
-    let project = TestProject::new();
-    let site = FixtureSite::new(HashMap::from([
-        (
-            "/safe.md".to_string(),
-            "Safe docs carry CTX_SAFE_DOCS_ONLY.".to_string(),
-        ),
-        (
-            "/secret.md".to_string(),
-            "Secret docs carry CTX_SECRET_DOCS_ONLY.".to_string(),
-        ),
-    ]));
-    let outside = tempfile::tempdir().unwrap();
-    let evil_snapshot = outside.path().join("snapshot");
-    fs::create_dir_all(&evil_snapshot).unwrap();
-    fs::write(
-        evil_snapshot.join("pages.json"),
-        r#"[{"url":"https://example.invalid/evil","content":"Evil snapshot carries CTX_EVIL_SNAPSHOT_ONLY."}]"#,
-    )
-    .unwrap();
-
-    project
-        .ctx()
-        .args(["init", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    project
-        .ctx()
-        .arg("add")
-        .arg(format!("{}/safe.md", site.base_url))
-        .args(["--cwd"])
-        .arg(project.root.path())
-        .args(["--label", "docs"])
-        .assert()
-        .success();
-    project
-        .ctx()
-        .args(["link", "docs", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-
-    let mut manifest = project.manifest();
-    manifest["resources"][0]["url"] = json!(format!("{}/secret.md", site.base_url));
-    manifest["resources"][0]["local_path"] = json!(evil_snapshot.display().to_string());
-    fs::write(
-        project.root.path().join(".ctx/ctx.json"),
-        serde_json::to_string_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
-
-    project
-        .ctx()
-        .args(["sync", "--reindex", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-
-    let evil_query = project
-        .ctx()
-        .args(["query", "CTX_EVIL_SNAPSHOT_ONLY", "--cwd"])
-        .arg(project.root.path())
+        .args(["list", "fixture-docs"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
-    assert!(
-        !String::from_utf8(evil_query)
-            .unwrap()
-            .contains("Evil snapshot carries")
-    );
-
-    project
+    assert!(!String::from_utf8(list).unwrap().contains(&first));
+    let latest = project
         .ctx()
-        .args(["update", "docs", "--force", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-
-    let secret_query = project
-        .ctx()
-        .args(["query", "CTX_SECRET_DOCS_ONLY", "--cwd"])
-        .arg(project.root.path())
+        .args(["query", "alpha token", "--label", "fixture-docs"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
+    assert!(!String::from_utf8(latest).unwrap().contains("Initial docs"));
+    let latest = project
+        .ctx()
+        .args(["query", "beta token", "--label", "fixture-docs"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(String::from_utf8(latest).unwrap().contains("Changed docs"));
+    let old = project
+        .ctx()
+        .args([
+            "query",
+            "alpha token",
+            "--label",
+            "fixture-docs",
+            "--snapshot",
+            &first,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(String::from_utf8(old).unwrap().contains("Initial docs"));
+    let error = project
+        .ctx()
+        .args([
+            "query",
+            "x",
+            "--label",
+            "fixture-docs",
+            "--snapshot",
+            "does-not-exist",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
     assert!(
-        !String::from_utf8(secret_query)
+        String::from_utf8(error)
             .unwrap()
-            .contains("Secret docs carry")
+            .contains("snapshot not found: does-not-exist")
     );
-
-    manifest["resources"][0] = json!({
-        "id": "spoofed-source",
-        "label": "spoofed-source",
-        "kind": "source",
-        "url": "https://github.com/example/repo",
-        "reason": null,
-        "current": "main",
-        "local_path": outside.path().display().to_string(),
-        "created_at": "2026-01-01T00:00:00Z",
-        "updated_at": "2026-01-01T00:00:00Z"
-    });
-    fs::write(
-        project.root.path().join(".ctx/ctx.json"),
-        serde_json::to_string_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
-
-    project
-        .ctx()
-        .args(["path", "spoofed-source", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .failure();
-}
-
-#[test]
-fn unlink_removes_project_link_without_deleting_cache() {
-    let project = TestProject::new();
-    let site = FixtureSite::new(HashMap::from([(
-        "/cache.md".to_string(),
-        "Documentation about deleting cache entries.".to_string(),
-    )]));
-
-    project
-        .ctx()
-        .args(["init", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    project
-        .ctx()
-        .arg("add")
-        .arg(format!("{}/cache.md", site.base_url))
-        .args(["--cwd"])
-        .arg(project.root.path())
-        .args(["--label", "docs"])
-        .assert()
-        .success();
-    project
-        .ctx()
-        .args(["link", "docs", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    let cache_path = project.resource_path("docs");
-    assert!(std::path::Path::new(&cache_path).exists());
-
-    project
-        .ctx()
-        .args(["unlink", "docs", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    assert!(std::path::Path::new(&cache_path).exists());
-    assert!(
-        project.manifest()["resources"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-
-    project
-        .ctx()
-        .args(["remove", "docs", "--prune-cache", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    assert!(!std::path::Path::new(&cache_path).exists());
 }
 
 #[test]
@@ -1295,8 +910,7 @@ fn doctor_reports_outdated_default_install_metadata() {
     let output = project
         .ctx()
         .env("HOME", project.home.path())
-        .args(["doctor", "--cwd"])
-        .arg(project.root.path())
+        .args(["doctor"])
         .assert()
         .success()
         .get_output()
@@ -1309,88 +923,82 @@ fn doctor_reports_outdated_default_install_metadata() {
 }
 
 #[test]
-fn sync_rehydrates_missing_source_checkout_from_manifest() {
+fn add_by_sha_restores_pruned_checkout_and_is_idempotent_offline() {
     let project = TestProject::new();
     let fixture = GitFixture::new(project.root.path());
-    project
-        .ctx()
-        .args(["init", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
+    let url = format!("https://github.com/fixture/source/tree/{}", fixture.commit);
     project
         .ctx_with_git_config(&fixture.git_config)
-        .arg("add")
-        .arg("https://github.com/fixture/source")
-        .args(["--cwd"])
-        .arg(project.root.path())
-        .args(["--label", "fixture-source"])
+        .args(["add", &url, "--label", "fixture-source"])
         .assert()
         .success();
+    let first_path = project.resource_path("fixture-source");
+    assert!(Path::new(&first_path).join(".git").exists());
     project
         .ctx()
-        .args(["link", "fixture-source", "--cwd"])
-        .arg(project.root.path())
+        .args(["remove", "fixture-source", "--prune-cache"])
         .assert()
         .success();
-    project.assert_manifest_has_no_local_paths();
-    assert_eq!(project.resource_current("fixture-source"), fixture.commit);
-
-    let output = project
-        .ctx()
-        .args(["path", "fixture-source", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let first_path = String::from_utf8(output).unwrap().trim().to_string();
-    assert!(std::path::Path::new(&first_path).join(".git").exists());
-
+    assert!(!Path::new(&first_path).exists());
     project
         .ctx()
-        .args(["remove", "fixture-source", "--prune-cache", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    assert!(!std::path::Path::new(&first_path).exists());
-    project
-        .ctx()
-        .args(["path", "fixture-source", "--cwd"])
-        .arg(project.root.path())
+        .args(["path", "fixture-source"])
         .assert()
         .failure();
-
-    let sync = project
+    project
         .ctx_with_git_config(&fixture.git_config)
-        .args(["sync", "--cwd"])
-        .arg(project.root.path())
+        .args(["add", &url, "--label", "fixture-source"])
+        .assert()
+        .success();
+    assert!(
+        Path::new(&project.resource_path("fixture-source"))
+            .join(".git")
+            .exists()
+    );
+    let empty_config = project.root.path().join("empty-gitconfig");
+    fs::write(&empty_config, "").unwrap();
+    let output = project
+        .ctx_with_git_config(&empty_config)
+        .args(["add", &url, "--label", "fixture-source"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
-    let sync = String::from_utf8(sync).unwrap();
     assert!(
-        sync.contains("resources[1]{label,kind,ready,rehydrated,message}")
-            && sync.contains("\"fixture-source\",source,true,true"),
-        "{sync}"
+        String::from_utf8(output)
+            .unwrap()
+            .contains("existing: true")
     );
-
     let output = project
         .ctx()
-        .args(["path", "fixture-source", "--cwd"])
-        .arg(project.root.path())
+        .args(["list", "fixture-source"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
-    let second_path = String::from_utf8(output).unwrap().trim().to_string();
-    assert!(std::path::Path::new(&second_path).join(".git").exists());
-    assert_eq!(project.resource_current("fixture-source"), fixture.commit);
-    project.assert_manifest_has_no_local_paths();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains(&fixture.commit));
+    let mut lines = output
+        .lines()
+        .skip_while(|line| !line.trim().starts_with("resources["));
+    let header = lines.next().unwrap();
+    let columns = header
+        .split('{')
+        .nth(1)
+        .unwrap()
+        .split('}')
+        .next()
+        .unwrap()
+        .split(',')
+        .collect::<Vec<_>>();
+    let current_index = columns
+        .iter()
+        .position(|column| *column == "current")
+        .unwrap();
+    let row = split_toon_row(lines.next().unwrap());
+    assert_eq!(row[current_index], fixture.commit);
 }
 
 #[test]
@@ -1404,30 +1012,15 @@ fn embeddings_enable_vector_results_when_lexical_search_misses() {
 
     project
         .ctx_with_embeddings()
-        .args(["init", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    project
-        .ctx_with_embeddings()
         .arg("add")
         .arg(format!("{}/rust.md", site.base_url))
-        .args(["--cwd"])
-        .arg(project.root.path())
         .args(["--label", "rust-docs"])
-        .assert()
-        .success();
-    project
-        .ctx_with_embeddings()
-        .args(["link", "rust-docs", "--cwd"])
-        .arg(project.root.path())
         .assert()
         .success();
 
     let output = project
         .ctx_with_embeddings()
-        .args(["query", "resource ownership rules", "--debug", "--cwd"])
-        .arg(project.root.path())
+        .args(["query", "resource ownership rules", "--debug"])
         .assert()
         .success()
         .get_output()
@@ -1445,29 +1038,14 @@ fn live_github_source_can_be_cached_and_resolved_by_path() {
     let project = TestProject::new();
     project
         .ctx()
-        .args(["init", "--cwd"])
-        .arg(project.root.path())
-        .assert()
-        .success();
-    project
-        .ctx()
         .arg("add")
         .arg("https://github.com/octocat/Hello-World")
-        .args(["--cwd"])
-        .arg(project.root.path())
         .args(["--label", "hello-world"])
-        .assert()
-        .success();
-    project
-        .ctx()
-        .args(["link", "hello-world", "--cwd"])
-        .arg(project.root.path())
         .assert()
         .success();
     let output = project
         .ctx()
-        .args(["path", "hello-world", "--cwd"])
-        .arg(project.root.path())
+        .args(["path", "hello-world"])
         .assert()
         .success()
         .get_output()
@@ -1485,16 +1063,13 @@ fn live_arxiv_paper_can_be_added_and_queried() {
         .ctx()
         .arg("add")
         .arg("https://arxiv.org/abs/1706.03762")
-        .args(["--cwd"])
-        .arg(project.root.path())
         .args(["--label", "attention-paper"])
         .assert()
         .success();
 
     let list = project
         .ctx()
-        .args(["list", "--kind", "research-paper", "--cwd"])
-        .arg(project.root.path())
+        .args(["list", "--kind", "research-paper"])
         .assert()
         .success()
         .get_output()
@@ -1506,8 +1081,7 @@ fn live_arxiv_paper_can_be_added_and_queried() {
 
     let show = project
         .ctx()
-        .args(["show", "attention-paper", "--snapshots", "--cwd"])
-        .arg(project.root.path())
+        .args(["list", "attention-paper", "--snapshots"])
         .assert()
         .success()
         .get_output()
@@ -1526,9 +1100,7 @@ fn live_arxiv_paper_can_be_added_and_queried() {
             "attention-paper",
             "--kind",
             "research-paper",
-            "--cwd",
         ])
-        .arg(project.root.path())
         .assert()
         .success()
         .get_output()
@@ -1538,4 +1110,206 @@ fn live_arxiv_paper_can_be_added_and_queried() {
     assert!(stdout.contains("Attention Is All You Need"));
     assert!(stdout.contains("Transformer"));
     assert!(stdout.contains("https://arxiv.org/abs/1706.03762"));
+}
+
+#[test]
+fn add_rejects_label_conflict_before_fetching() {
+    let project = TestProject::new();
+    let site = FixtureSite::new(HashMap::from([(
+        "/".to_string(),
+        "Cached docs.".to_string(),
+    )]));
+    let url = format!("{}/", site.base_url);
+    project
+        .ctx()
+        .args(["add", &url, "--label", "taken"])
+        .assert()
+        .success();
+    let error = project
+        .ctx()
+        .args(["add", "https://example.invalid/", "--label", "taken"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    assert!(String::from_utf8(error).unwrap().contains(&format!(
+        "label 'taken' is already used by {url}; remove it or choose another label"
+    )));
+}
+
+#[test]
+fn add_persists_reason_and_preserves_it_on_readd_and_update() {
+    let project = TestProject::new();
+    // Exercise the migration from the existing resource schema, not just a fresh database.
+    let conn = rusqlite::Connection::open(project.home.path().join("ctx.db")).unwrap();
+    conn.execute_batch("CREATE TABLE resources (id TEXT PRIMARY KEY, label TEXT NOT NULL, kind TEXT NOT NULL, url TEXT NOT NULL, current TEXT NOT NULL, local_path TEXT, updated_at TEXT NOT NULL);").unwrap();
+    let site = FixtureSite::new(HashMap::from([(
+        "/".to_string(),
+        "Initial documentation.".to_string(),
+    )]));
+    let url = format!("{}/", site.base_url);
+    let output = project
+        .ctx()
+        .args([
+            "add",
+            &url,
+            "--label",
+            "reason-docs",
+            "--reason",
+            "authoritative-reference",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("authoritative-reference")
+    );
+    site.set("/", "Changed documentation.");
+    let output = project
+        .ctx()
+        .args(["add", &url, "--label", "reason-docs"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("existing: true"));
+    assert!(output.contains("authoritative-reference"));
+    let result = project
+        .ctx()
+        .args(["query", "Initial", "--label", "reason-docs"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        String::from_utf8(result)
+            .unwrap()
+            .contains("Initial documentation")
+    );
+    project
+        .ctx()
+        .args(["update", "reason-docs"])
+        .assert()
+        .success();
+    let list = project
+        .ctx()
+        .args(["list", "reason-docs"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        String::from_utf8(list)
+            .unwrap()
+            .contains("authoritative-reference")
+    );
+    project
+        .ctx()
+        .args([
+            "add",
+            &url,
+            "--label",
+            "reason-docs",
+            "--reason",
+            "revised-reference",
+        ])
+        .assert()
+        .success();
+    let list = project
+        .ctx()
+        .arg("list")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        String::from_utf8(list)
+            .unwrap()
+            .contains("revised-reference")
+    );
+}
+
+#[test]
+fn invalid_legacy_manifest_is_ignored_by_query_and_doctor() {
+    let project = TestProject::new();
+    fs::create_dir_all(project.root.path().join(".ctx")).unwrap();
+    fs::write(project.root.path().join(".ctx/ctx.json"), "{broken").unwrap();
+    project
+        .ctx()
+        .current_dir(project.root.path())
+        .args(["query", "x"])
+        .assert()
+        .success();
+    project
+        .ctx()
+        .current_dir(project.root.path())
+        .arg("doctor")
+        .assert()
+        .success();
+}
+
+#[test]
+fn guides_list_embedded_workflows_and_report_unknown_names() {
+    let project = TestProject::new();
+    let output = project
+        .ctx()
+        .arg("guides")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    for name in [
+        "pin",
+        "idiomatic-usage",
+        "copy-pattern",
+        "tests-as-spec",
+        "trace-api",
+        "error-to-source",
+        "upgrade-impact",
+        "why-history",
+    ] {
+        assert!(
+            output
+                .lines()
+                .any(|line| line.starts_with(&format!("{name}  ")))
+        );
+    }
+    let output = project
+        .ctx()
+        .args(["guides", "pin"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        include_str!("../guides/pin.md")
+    );
+    assert!(include_str!("../guides/pin.md").contains("ctx path"));
+    let error = project
+        .ctx()
+        .args(["guides", "nope"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    assert!(
+        String::from_utf8(error)
+            .unwrap()
+            .contains("unknown guide 'nope'; run `ctx guides` to list guides")
+    );
 }

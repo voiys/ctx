@@ -62,6 +62,13 @@ pub(crate) fn ensure_db(path: &Path) -> Result<()> {
         ",
     )?;
     ensure_chunk_columns(&conn)?;
+    let columns = conn
+        .prepare("PRAGMA table_info(resources)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == "reason") {
+        conn.execute("ALTER TABLE resources ADD COLUMN reason TEXT", [])?;
+    }
     if conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM resources WHERE kind = ?1)",
         params![LEGACY_NOTES_KIND],
@@ -296,15 +303,16 @@ pub(crate) fn upsert_global_resource(
     ensure_db(db_path)?;
     let conn = open_db(db_path)?;
     conn.execute(
-        "INSERT INTO resources(id, label, kind, url, current, local_path, updated_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO resources(id, label, kind, url, current, local_path, updated_at, reason)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(id) DO UPDATE SET
             label = excluded.label,
             kind = excluded.kind,
             url = excluded.url,
             current = excluded.current,
             local_path = excluded.local_path,
-            updated_at = excluded.updated_at",
+            updated_at = excluded.updated_at,
+            reason = COALESCE(excluded.reason, resources.reason)",
         params![
             resource.id,
             resource.label,
@@ -312,7 +320,8 @@ pub(crate) fn upsert_global_resource(
             resource.url,
             resource.current,
             resource.local_path,
-            resource.updated_at
+            resource.updated_at,
+            resource.reason
         ],
     )?;
     if let Some(snapshot) = snapshot {
@@ -339,7 +348,7 @@ pub(crate) fn find_global_resource(db_path: &Path, target: &str) -> Result<Resou
     let conn = open_db(db_path)?;
     let resource = conn
         .query_row(
-            "SELECT id, label, kind, url, current, local_path, updated_at
+            "SELECT id, label, kind, url, current, local_path, updated_at, reason
              FROM resources
              WHERE label = ?1 OR url = ?1 OR id = ?1",
             params![target],
@@ -352,42 +361,39 @@ pub(crate) fn find_global_resource(db_path: &Path, target: &str) -> Result<Resou
 
 pub(crate) fn allowed_global_resource_ids(
     db_path: &Path,
-    label: Option<&str>,
+    labels: &[String],
     kind: Option<ResourceKind>,
-) -> Result<BTreeSet<String>> {
-    ensure_db(db_path)?;
-    let conn = open_db(db_path)?;
-    let mut stmt = conn.prepare("SELECT id, label, kind FROM resources")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
-    let mut out = BTreeSet::new();
-    for row in rows {
-        let (id, resource_label, resource_kind) = row?;
-        let Some(parsed_kind) = parse_kind(&resource_kind) else {
-            continue;
-        };
-        if parsed_kind == ResourceKind::Source {
-            continue;
+    snapshot: Option<&str>,
+) -> Result<BTreeSet<(String, String)>> {
+    let resources = list_global_resource_models(db_path, kind)?
+        .into_iter()
+        .filter(|resource| resource.kind != ResourceKind::Source)
+        .collect::<Vec<_>>();
+    for label in labels {
+        if !resources.iter().any(|resource| &resource.label == label) {
+            bail!("no queryable resource matched label: {label}");
         }
-        if let Some(label) = label
-            && resource_label != label
-        {
-            continue;
-        }
-        if let Some(kind) = kind
-            && parsed_kind != kind
-        {
-            continue;
-        }
-        out.insert(id);
     }
-    if label.is_some() && out.is_empty() {
-        bail!("no queryable resource matched label");
+    let conn = open_db(db_path)?;
+    let mut out = BTreeSet::new();
+    for resource in resources {
+        if !labels.is_empty() && !labels.contains(&resource.label) {
+            continue;
+        }
+        let pointer = snapshot.unwrap_or(&resource.current);
+        let exists = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM snapshots WHERE resource_id = ?1 AND snapshot_id = ?2)",
+            params![resource.id, pointer],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if exists {
+            out.insert((resource.id, pointer.to_string()));
+        }
+    }
+    if let Some(snapshot) = snapshot
+        && out.is_empty()
+    {
+        bail!("snapshot not found: {snapshot}");
     }
     Ok(out)
 }
@@ -401,7 +407,8 @@ pub(crate) fn list_global_resources(
         "SELECT r.id, r.label, r.kind, r.url, r.current, r.local_path, r.updated_at,
                 COUNT(s.snapshot_id) AS snapshot_count,
                 MAX(CASE WHEN s.snapshot_id = r.current THEN s.page_count END) AS current_page_count,
-                MAX(CASE WHEN s.snapshot_id = r.current THEN s.content_hash END) AS current_content_hash
+                MAX(CASE WHEN s.snapshot_id = r.current THEN s.content_hash END) AS current_content_hash,
+                r.reason
          FROM resources r
          LEFT JOIN snapshots s ON s.resource_id = r.id
          GROUP BY r.id
@@ -419,6 +426,7 @@ pub(crate) fn list_global_resources(
             "snapshot_count": row.get::<_, i64>(7)?,
             "current_page_count": row.get::<_, Option<i64>>(8)?,
             "current_content_hash": row.get::<_, Option<String>>(9)?,
+            "reason": row.get::<_, Option<String>>(10)?,
         }))
     })?;
     let mut out = Vec::new();
@@ -453,7 +461,7 @@ pub(crate) fn list_global_resource_models(
     ensure_db(db_path)?;
     let conn = open_db(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT id, label, kind, url, current, local_path, updated_at
+        "SELECT id, label, kind, url, current, local_path, updated_at, reason
          FROM resources
          ORDER BY kind ASC, label ASC",
     )?;
@@ -534,23 +542,6 @@ pub(crate) fn current_content_hash(
     Ok(hash)
 }
 
-pub(crate) fn snapshot_path_for_pointer(
-    db_path: &Path,
-    resource_id: &str,
-    snapshot_id: &str,
-) -> Result<Option<String>> {
-    ensure_db(db_path)?;
-    let conn = open_db(db_path)?;
-    let path = conn
-        .query_row(
-            "SELECT path FROM snapshots WHERE resource_id = ?1 AND snapshot_id = ?2",
-            params![resource_id, snapshot_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(path)
-}
-
 pub(crate) fn remove_global_resource(
     db_path: &Path,
     resource: &Resource,
@@ -596,7 +587,7 @@ fn resource_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Resource> {
         label: row.get(1)?,
         kind,
         url: row.get(3)?,
-        reason: None,
+        reason: row.get(7)?,
         current: row.get(4)?,
         local_path: row.get(5)?,
         created_at: updated_at.clone(),

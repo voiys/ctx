@@ -4,8 +4,6 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::constants::{DEFAULT_BUDGET_TOKENS, DEFAULT_TOP_K};
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ResourceKind {
@@ -25,28 +23,6 @@ impl From<QueryKind> for ResourceKind {
         match value {
             QueryKind::Docs => ResourceKind::Docs,
             QueryKind::ResearchPaper => ResourceKind::ResearchPaper,
-        }
-    }
-}
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-pub(crate) struct Manifest {
-    pub(crate) version: u32,
-    pub(crate) defaults: Defaults,
-    pub(crate) resources: Vec<Resource>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct Defaults {
-    pub(crate) top_k: usize,
-    pub(crate) budget_tokens: usize,
-}
-
-impl Default for Defaults {
-    fn default() -> Self {
-        Self {
-            top_k: DEFAULT_TOP_K,
-            budget_tokens: DEFAULT_BUDGET_TOKENS,
         }
     }
 }
@@ -74,9 +50,6 @@ pub(crate) struct CommandStatus<T: Serialize> {
 
 #[derive(Debug)]
 pub(crate) struct RuntimePaths {
-    pub(crate) project_root: PathBuf,
-    pub(crate) manifest_path: PathBuf,
-    pub(crate) ctx_dir: PathBuf,
     pub(crate) home: PathBuf,
     pub(crate) db_path: PathBuf,
 }

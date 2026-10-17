@@ -5,7 +5,6 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use uuid::Uuid;
 
-use crate::models::Resource;
 use crate::util::run_command;
 
 pub(crate) fn cache_github_source(
@@ -47,13 +46,6 @@ pub(crate) fn cache_github_source_pointer(
             format!("failed shallow fetch for source pointer {pointer}: {fetch_error}")
         })
     })
-}
-
-pub(crate) fn validate_source_pointer(resource: &Resource, pointer: &str) -> Result<()> {
-    if resource.current == pointer {
-        return Ok(());
-    }
-    bail!("source pointer changes must be done by adding or caching an explicit GitHub ref first")
 }
 
 fn cache_github_source_from_fetch(

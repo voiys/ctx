@@ -1,4 +1,3 @@
-mod agents;
 mod app;
 mod arxiv;
 mod constants;
@@ -7,7 +6,6 @@ mod crawl;
 mod embeddings;
 mod input;
 mod install;
-mod manifest;
 mod markdown;
 mod models;
 mod output;
