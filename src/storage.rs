@@ -57,15 +57,6 @@ pub(crate) fn ensure_db(path: &Path) -> Result<()> {
             snapshot_id UNINDEXED,
             label UNINDEXED
         );
-        CREATE TABLE IF NOT EXISTS ledgers (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            contents TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS ledgers_updated_at
-        ON ledgers(updated_at DESC);
         ",
     )?;
     ensure_chunk_columns(&conn)?;

@@ -2,14 +2,13 @@
 
 ## Durable boundaries
 
-ctx keeps four kinds of data:
+ctx keeps three durable boundaries:
 
 - Project manifest: `.ctx/ctx.json`
 - Global cache: `~/.ctx`
 - SQLite retrieval index: `~/.ctx/ctx.db`
-- Shared ledgers: the `ledgers` table in `~/.ctx/ctx.db`
 
-The global cache holds downloaded references. A project manifest lists the references that matter to one project. It never stores local cache paths. CTX can rebuild the SQLite search index. Ledgers are shared notes stored on this computer; they do not belong to a project or the search index.
+The global cache holds downloaded references. A project manifest lists the references that matter to one project. It never stores local cache paths. CTX can rebuild the SQLite search index.
 
 ## Module shape
 
@@ -17,7 +16,6 @@ The global cache holds downloaded references. A project manifest lists the refer
 main.rs       process entrypoint
 app.rs        CLI parsing and command orchestration
 context.rs    runtime paths and project readiness
-ledger.rs     global ledger identity, validation, models, and transactions
 models.rs     resource, manifest, snapshot, and retrieval types
 manifest.rs   .ctx/ctx.json reads and edits
 input.rs      absolute URL classification
@@ -41,7 +39,6 @@ The layering is:
 CLI -> AppContext -> manifest/cache/index services -> filesystem, Git, HTTP, SQLite
 ```
 
-Ledger commands use the shorter global path: `CLI -> AppContext -> ledger service -> SQLite`. They do not read or change a project manifest or use FTS5 search.
 
 ## Source and query paths
 
@@ -65,11 +62,9 @@ Indexing stores parser-derived section metadata for controlled Markdown notes an
 
 Set `CTX_EMBEDDINGS=off` for tests or constrained environments. The default backend is local `fastembed`.
 
-## SQLite and ledgers
+## SQLite
 
-All shared SQLite connections use WAL mode and wait up to five seconds for a lock. Setup adds the `ledgers` table and an index for listing the newest updates first. Repeated setup is safe and does not change FTS5 search.
-
-Create and write each use one short database change. A write changes `contents` and `updated_at` together. SQLite lets one writer save at a time while readers continue. CTX does not retry, merge, keep old versions, search ledgers, archive or delete them, or link them to projects. If two workers write at once, ctx keeps the write that finishes last.
+All shared SQLite connections use WAL mode and wait up to five seconds for a lock.
 
 ## Local install
 

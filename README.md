@@ -51,20 +51,6 @@ ctx agents --cwd /path/to/repo
 
 Bare `ctx` and `ctx --help` print this workflow before the command reference.
 
-## Global ledgers
-
-Ledgers are shared Markdown notes stored on this computer in the global `ctx.db`. You can use them from any folder that shares the same `CTX_HOME`. You do not need to set up or link a project.
-
-```sh
-ctx ledger create "Job Sync review"
-ctx ledger list
-ctx ledger show job-sync-review-20260725T214500Z
-ctx ledger write job-sync-review-20260725T214500Z --file ledger.md
-printf '# Current state\n' | ctx ledger write job-sync-review-20260725T214500Z --stdin
-```
-
-`write` replaces the whole note and keeps the text exactly as supplied. A reader never sees a half-written note. If two workers save at the same time, ctx keeps the write that finishes last. It does not merge changes or keep old versions. Read the ledger again before writing when someone else may have changed it. The ledger may be out of date, so check live code and services before acting on it.
-
 ## Resource model
 
 `ctx add` accepts absolute URLs only.
@@ -80,7 +66,7 @@ Source repositories are cached globally and explored with normal code tools such
 
 ## Bundled `$ctx` skill
 
-`ctx install` copies the binary and installs the bundled skill at `$CODEX_HOME/skills/ctx` or `~/.codex/skills/ctx`. Invoke it as `$ctx` when repository work depends on pinned upstream source, exact dependency versions, external documentation, research, project notes, or an assigned CTX ledger. It intentionally does not trigger for every task.
+`ctx install` copies the binary and installs the bundled skill at `$CODEX_HOME/skills/ctx` or `~/.codex/skills/ctx`. Invoke it as `$ctx` when repository work depends on pinned upstream source, exact dependency versions, external documentation, research, project notes. It intentionally does not trigger for every task.
 
 ## Build and install locally
 
